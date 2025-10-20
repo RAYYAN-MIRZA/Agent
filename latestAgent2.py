@@ -15,9 +15,14 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 import uvicorn
-
+from agentWebSocket import AsyncAgentClient 
 from scapy.all import ARP, Ether, srp, conf
+import asyncio
 
+# Initialize the agent client
+agent_client = AsyncAgentClient()
+
+# ------
 # ----- Config -----
 SCAN_INTERVAL = 20           # seconds between automatic scans
 MDNS_LISTEN_SEC = 6          # seconds for passive mDNS listen
@@ -282,7 +287,11 @@ async def do_scan_and_broadcast():
     save_health(health)
 
     payload = {"type":"scan_result", "scan_time": now_ts(), "subnet": cidr, "devices": devices_list, "health": health}
+
     await broadcast_update(payload)
+
+    # send_to_backend(payload)
+    await agent_client.send_scan_result(payload)
 
 # ----- Periodic scanner -----
 async def periodic_scanner():
@@ -328,7 +337,22 @@ async def websocket_endpoint(ws: WebSocket):
     except Exception:
         clients.discard(ws)
 
+
 # ----- Run -----
 if __name__ == "__main__":
-    print("Agent with status tracking starting (run as root for best results)")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    
+
+    async def main():
+        # Start the SignalR client in background
+        asyncio.create_task(agent_client.run())
+
+        print("Agent with status tracking starting (run as root for best results)")
+
+        # Start FastAPI server in same loop
+        config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
+        server = uvicorn.Server(config)
+        await server.serve()
+
+    # Run everything in one event loop
+    asyncio.run(main())
+
