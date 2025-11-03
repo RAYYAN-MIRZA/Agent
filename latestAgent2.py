@@ -19,6 +19,9 @@ from agentWebSocket import AsyncAgentClient
 from scapy.all import ARP, Ether, srp, conf
 import asyncio
 
+from manuf import manuf
+mac_parser = manuf.MacParser()
+
 # Initialize the agent client
 agent_client = AsyncAgentClient()
 
@@ -58,6 +61,21 @@ def load_json_or(path, default):
         except:
             return default
     return default
+
+def resolve_hostname(ip):
+    try:
+        return socket.gethostbyaddr(ip)[0]
+    except:
+        return ""
+
+def get_vendor(mac):
+    if not mac:
+        return ""
+    try:
+        vendor = mac_parser.get_manuf(mac)
+        return vendor if vendor else ""
+    except:
+        return ""
 
 # ----- Device helpers -----
 def make_device_record(ip, mac, hostname="", sources=None, ports=None, vendor=""):
@@ -234,8 +252,10 @@ async def do_scan_and_broadcast():
         key = mac if mac else ipaddr
         seen_keys.add(key)
         rec = devices.get(key)
+        _hostname = resolve_hostname(ipaddr)
+        _vendor = get_vendor(mac)
         if not rec:
-            rec = make_device_record(ipaddr, mac, hostname="", sources=["arp"])
+            rec = make_device_record(ipaddr, mac, hostname=_hostname, sources=["arp"], vendor=_vendor)
             rec = compute_confidence_and_evidence(rec)
             devices[key] = rec
             append_event({"timestamp": now_ts(), "type": "device_added", "device_ip": ipaddr, "mac": mac})
@@ -267,7 +287,9 @@ async def do_scan_and_broadcast():
         else:
             # create mdns-only entry, key by ip
             key = mip
-            rec = make_device_record(mip, mac="", hostname="", sources=["mdns"])
+            _hostname = resolve_hostname(mip)
+            _vendor = get_vendor(mac)
+            rec = make_device_record(mip, mac="", hostname=_hostname, sources=["mdns"], vendor=_vendor)
             rec = compute_confidence_and_evidence(rec)
             devices[key] = rec
             seen_keys.add(key)

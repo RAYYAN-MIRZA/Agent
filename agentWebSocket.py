@@ -2,7 +2,7 @@ import json
 import asyncio
 from signalrcore.hub_connection_builder import HubConnectionBuilder
 
-BACKEND_URL = "https://localhost:44336/agentHub"  # SignalR hub
+BACKEND_URL = "https://192.168.100.34:7079/agentHub"  # SignalR hub
 AGENT_ID = "AGENT_001"
 
 
