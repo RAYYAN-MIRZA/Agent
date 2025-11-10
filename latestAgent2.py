@@ -36,6 +36,9 @@ import uvicorn
 from scapy.all import ARP, Ether, srp, conf
 from manuf import manuf
 
+import sys
+import platform
+
 # ---------- Config ----------
 PREFERRED_PORT = 8000
 SCAN_INTERVAL = 20            # seconds between automatic scans
@@ -54,6 +57,27 @@ conf.verb = 0  # scapy quiet
 mac_parser = manuf.MacParser()
 
 app = FastAPI()
+# ---------- Ensure admin/root ----------
+def ensure_admin():
+    system = platform.system()
+    if system == "Windows":
+        import ctypes
+        try:
+            if not ctypes.windll.shell32.IsUserAnAdmin():
+                # Relaunch script with admin rights (UAC prompt)
+                ctypes.windll.shell32.ShellExecuteW(
+                    None, "runas", sys.executable, " ".join([f'"{arg}"' for arg in sys.argv]), None, 1
+                )
+                sys.exit(0)  # Exit current non-admin instance
+        except Exception as e:
+            print("Failed to elevate to admin:", e)
+            sys.exit(1)
+    else:  # Linux / macOS
+        if os.geteuid() != 0:
+            print("This script must be run as root. Use sudo.")
+            sys.exit(1)
+
+ensure_admin()
 
 # ---------- Utilities ----------
 def now_ts() -> str:
