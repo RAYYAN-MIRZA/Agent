@@ -39,7 +39,10 @@ from manuf import manuf
 import sys
 import platform
 
+import requests
+
 # ---------- Config ----------
+API_URL_BASE = "http://192.168.100.34:5017/api/agent"
 PREFERRED_PORT = 8000
 SCAN_INTERVAL = 20            # seconds between automatic scans
 MDNS_LISTEN_SEC = 6           # seconds for passive mDNS listen
@@ -250,6 +253,7 @@ def save_devices(devices: Dict[str, dict]):
     save_json_atomic(DEVICES_FILE, devices)
 
 def append_event(evt: dict):
+    send_event_to_backend(evt)
     events = load_json_or(EVENTS_FILE, [])
     events.append(evt)
     save_json_atomic(EVENTS_FILE, events)
@@ -425,6 +429,8 @@ async def do_scan_and_write():
     save_devices(devices)
     save_health(health)
 
+    send_full_snapshot()
+
     print(f"[{now_ts()}] Scan complete: {health['online_count']} online, {health['offline_count']} offline")
     return health
 
@@ -435,6 +441,37 @@ async def periodic_scanner():
         except Exception as e:
             print("Scan error:", e)
         await asyncio.sleep(SCAN_INTERVAL)
+
+
+def load_json_file(path):
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def send_full_snapshot():
+    snapshot = {
+        "devices": load_json_file(DEVICES_FILE),
+        "events": load_json_file(EVENTS_FILE),
+        "health": load_json_file(HEALTH_FILE),
+        "vendor_cache": load_json_file(VENDOR_CACHE_FILE)
+    }
+    try:
+        r = requests.post(API_URL_BASE + '/send', json=snapshot, timeout=5)
+        print(f"[📡] Sent snapshot: {r.status_code}")
+    except Exception as e:
+        print(f"[❌] Failed to send snapshot: {e}")
+
+def send_event_to_backend(evt: dict):
+    try:
+        # simple POST, timeout short to not block
+        requests.post(API_URL_BASE + '/event', json=evt, timeout=3)
+        print(f"[📡] Event sent: {evt.get('type')}")
+    except Exception as e:
+        print(f"[⚠️] Failed to send event: {e}")
 
 # ---------- FastAPI endpoints ----------
 @app.on_event("startup")
