@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-latestAgent3.py
-Improved local discovery agent — no external connectivity
+latestAgent4.py
+Optimized local discovery agent — parallelized, no TCP probes
 Features:
  - ARP scan (scapy)
  - passive mDNS listen
- - ICMP ping (subprocess) + async TCP probes
- - reverse DNS
+ - ICMP ping (subprocess)
+ - reverse DNS (async/threaded)
  - vendor lookup with local cache (manuf)
  - merge devices by MAC (prefer) or IP
  - confidence scoring + decay
@@ -17,7 +17,7 @@ Requirements:
  - sudo (for ARP + raw sockets)
  - pip install fastapi uvicorn scapy manuf
 Run:
- sudo -E $(which python) latestAgent3.py
+ sudo -E $(which python) latestAgent4.py
 """
 import os
 import json
@@ -28,6 +28,7 @@ import ipaddress
 import subprocess
 from datetime import datetime, timezone
 from typing import Dict, Tuple, List
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -38,7 +39,6 @@ from manuf import manuf
 
 import sys
 import platform
-
 import requests
 
 # ---------- Config ----------
@@ -47,7 +47,6 @@ PREFERRED_PORT = 8000
 SCAN_INTERVAL = 20            # seconds between automatic scans
 MDNS_LISTEN_SEC = 6           # seconds for passive mDNS listen
 OFFLINE_THRESHOLD = SCAN_INTERVAL * 3
-COMMON_PORTS = [22, 80, 443, 445, 3389]   # tcp probes
 
 DATA_DIR = "data"
 DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
@@ -58,8 +57,10 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 conf.verb = 0  # scapy quiet
 mac_parser = manuf.MacParser()
+dns_executor = ThreadPoolExecutor(max_workers=20)
 
 app = FastAPI()
+
 # ---------- Ensure admin/root ----------
 def ensure_admin():
     system = platform.system()
@@ -67,15 +68,14 @@ def ensure_admin():
         import ctypes
         try:
             if not ctypes.windll.shell32.IsUserAnAdmin():
-                # Relaunch script with admin rights (UAC prompt)
                 ctypes.windll.shell32.ShellExecuteW(
                     None, "runas", sys.executable, " ".join([f'"{arg}"' for arg in sys.argv]), None, 1
                 )
-                sys.exit(0)  # Exit current non-admin instance
+                sys.exit(0)
         except Exception as e:
             print("Failed to elevate to admin:", e)
             sys.exit(1)
-    else:  # Linux / macOS
+    else:
         if os.geteuid() != 0:
             print("This script must be run as root. Use sudo.")
             sys.exit(1)
@@ -122,6 +122,10 @@ def resolve_hostname(ip: str) -> str:
     except Exception:
         return ""
 
+async def async_resolve_hostname(ip: str):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(dns_executor, resolve_hostname, ip)
+
 # ---------- Vendor cache ----------
 def get_vendor_cached(mac: str) -> str:
     if not mac:
@@ -140,7 +144,7 @@ def get_vendor_cached(mac: str) -> str:
     return vendor
 
 # ---------- Device helpers ----------
-def make_device_record(ip: str, mac: str, hostname: str = "", sources=None, ports=None, vendor: str = ""):
+def make_device_record(ip: str, mac: str, hostname: str = "", sources=None, vendor: str = ""):
     return {
         "ip": ip,
         "mac": mac,
@@ -149,7 +153,6 @@ def make_device_record(ip: str, mac: str, hostname: str = "", sources=None, port
         "first_seen": now_ts(),
         "last_seen": now_ts(),
         "discovery_sources": sources or [],
-        "open_ports": ports or [],
         "evidence": [],
         "confidence": 0,
         "status": "online"
@@ -158,34 +161,24 @@ def make_device_record(ip: str, mac: str, hostname: str = "", sources=None, port
 def compute_confidence_and_evidence(device: dict) -> dict:
     evidence = []
     weight = 0
-    # ARP
     if "arp" in device.get("discovery_sources", []):
         evidence.append({"type":"arp","weight":40,"details":"MAC present in ARP scan"})
         weight += 40
-    # mdns
     if "mdns" in device.get("discovery_sources", []):
         evidence.append({"type":"mdns","weight":30,"details":"mDNS observed"})
         weight += 30
-    # ping
     if "ping" in device.get("discovery_sources", []):
         evidence.append({"type":"ping","weight":20,"details":"ICMP responded"})
         weight += 20
-    # tcp ports
-    if device.get("open_ports"):
-        evidence.append({"type":"tcp_ports","weight":20,"details":f"Ports: {device['open_ports']}"})
-        weight += 20
-    # hostname
     if device.get("hostname"):
         evidence.append({"type":"hostname","weight":10,"details":f"Hostname: {device['hostname']}"})
         weight += 10
     device["evidence"] = evidence
-    # confidence integer 0-100
     device["confidence"] = min(100, weight)
     return device
 
 # ---------- ARP + mDNS ----------
 def arp_scan(cidr: str, timeout=2) -> List[Tuple[str, str]]:
-    # returns list of tuples (ip, mac)
     packet = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=cidr)
     ans, _ = srp(packet, timeout=timeout, retry=1)
     results = []
@@ -224,7 +217,6 @@ def passive_mdns_collect(duration=6) -> List[str]:
 
 # ---------- Active probes ----------
 def is_alive_ping(ip: str) -> bool:
-    # non-blocking call via subprocess; small timeout
     try:
         subprocess.check_output(["ping", "-c", "1", "-W", "1", ip],
                                 stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
@@ -232,30 +224,17 @@ def is_alive_ping(ip: str) -> bool:
     except Exception:
         return False
 
-async def tcp_probe(ip: str, port: int, timeout=0.4) -> bool:
-    try:
-        fut = asyncio.open_connection(ip, port)
-        reader, writer = await asyncio.wait_for(fut, timeout=timeout)
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
-        return True
-    except Exception:
-        return False
-
-# ---------- Persistence wrappers ----------
+# ---------- Persistence ----------
 def load_devices() -> Dict[str, dict]:
     return load_json_or(DEVICES_FILE, {})
 
 def save_devices(devices: Dict[str, dict]):
     save_json_atomic(DEVICES_FILE, devices)
 
-def append_event(evt: dict):
-    send_event_to_backend(evt)
-    events = load_json_or(EVENTS_FILE, [])
-    events.append(evt)
+def load_events() -> List[dict]:
+    return load_json_or(EVENTS_FILE, [])
+
+def save_events(events: List[dict]):
     save_json_atomic(EVENTS_FILE, events)
 
 def save_health(h: dict):
@@ -264,24 +243,21 @@ def save_health(h: dict):
 # ---------- Merge & update logic ----------
 def find_existing_key_by_mac_or_ip(devices: Dict[str, dict], mac: str, ip: str) -> str:
     mac_norm = (mac or "").lower()
-    # prefer exact mac match
     if mac_norm:
         for k, v in devices.items():
             if v.get("mac", "").lower() == mac_norm:
                 return k
-    # fallback: match by IP
     for k, v in devices.items():
         if v.get("ip") == ip:
             return k
     return ""
 
-async def enrich_and_update_for_entry(devices: Dict[str, dict], ipaddr: str, mac: str, mdns_seen: bool):
-    # determine key (merge logic)
+async def enrich_and_update_for_entry(devices: Dict[str, dict], ipaddr: str, mac: str, mdns_seen: bool, events: List[dict]):
     key = find_existing_key_by_mac_or_ip(devices, mac, ipaddr) or (mac or ipaddr)
     rec = devices.get(key)
-    hostname = resolve_hostname(ipaddr)
+    hostname = await async_resolve_hostname(ipaddr)
     vendor = get_vendor_cached(mac)
-    # if new
+
     if not rec:
         rec = make_device_record(ipaddr, mac, hostname=hostname, sources=["arp"] if mac else ["arp"], vendor=vendor)
         if mdns_seen and "mdns" not in rec["discovery_sources"]:
@@ -289,9 +265,8 @@ async def enrich_and_update_for_entry(devices: Dict[str, dict], ipaddr: str, mac
             rec["last_seen"] = now_ts()
         rec = compute_confidence_and_evidence(rec)
         devices[key] = rec
-        append_event({"timestamp": now_ts(), "type": "device_added", "device_ip": ipaddr, "mac": mac})
+        events.append({"timestamp": now_ts(), "type": "device_added", "device_ip": ipaddr, "mac": mac})
     else:
-        # update existing
         rec["ip"] = ipaddr or rec.get("ip", "")
         if mac and not rec.get("mac"):
             rec["mac"] = mac
@@ -301,35 +276,21 @@ async def enrich_and_update_for_entry(devices: Dict[str, dict], ipaddr: str, mac
             rec["discovery_sources"].append("mdns")
         rec["last_seen"] = now_ts()
 
-    # active probes (run in executor to not block loop)
-    loop = asyncio.get_event_loop()
-    ping_ok = await loop.run_in_executor(None, is_alive_ping, ipaddr)
+    ping_ok = await asyncio.get_event_loop().run_in_executor(None, is_alive_ping, ipaddr)
     if ping_ok and "ping" not in rec["discovery_sources"]:
         rec["discovery_sources"].append("ping")
-    # tcp probes concurrent
-    port_tasks = [tcp_probe(ipaddr, p) for p in COMMON_PORTS]
-    try:
-        port_results = await asyncio.gather(*port_tasks)
-    except Exception:
-        port_results = [False] * len(COMMON_PORTS)
-    open_ports = [p for p, ok in zip(COMMON_PORTS, port_results) if ok]
-    if open_ports:
-        rec["open_ports"] = sorted(list(set(rec.get("open_ports", []) + open_ports)))
 
-    # hostname enrichment if missing
     if not rec.get("hostname") and hostname:
         rec["hostname"] = hostname
-
-    # vendor refresh
     if not rec.get("vendor"):
         rec["vendor"] = vendor
 
-    # recompute confidence
     rec = compute_confidence_and_evidence(rec)
     devices[key] = rec
     return key
 
-def apply_status_logic(devices: Dict[str, dict], seen_keys: set, offline_threshold: int = OFFLINE_THRESHOLD) -> Dict[str, dict]:
+def apply_status_logic(devices: Dict[str, dict], seen_keys: set, offline_threshold: int = OFFLINE_THRESHOLD, events: List[dict] = None) -> Dict[str, dict]:
+    events = events or []
     now = datetime.now(timezone.utc)
     for key, dev in list(devices.items()):
         prev_status = dev.get("status", "offline")
@@ -344,16 +305,14 @@ def apply_status_logic(devices: Dict[str, dict], seen_keys: set, offline_thresho
                 age = offline_threshold + 1
             if age > offline_threshold:
                 dev["status"] = "offline"
-                # confidence decay on long absence
                 dev["confidence"] = max(0, dev.get("confidence", 0) - 20)
             elif age > (offline_threshold / 2):
                 dev["status"] = "offline"
                 dev["confidence"] = max(0, dev.get("confidence", 0) - 10)
             else:
                 dev["status"] = "online"
-        # emit event if changed
         if prev_status != dev["status"]:
-            append_event({
+            events.append({
                 "timestamp": now_ts(),
                 "type": "device_status_changed",
                 "device_ip": dev.get("ip",""),
@@ -363,42 +322,31 @@ def apply_status_logic(devices: Dict[str, dict], seen_keys: set, offline_thresho
             })
     return devices
 
-# ---------- Main scan & periodic task ----------
+# ---------- Main scan ----------
 async def do_scan_and_write():
     ip = get_default_ipv4_interface_ip()
     cidr = make_cidr_for_ip(ip)
     health = {"scan_time": now_ts(), "subnet": cidr, "devices_found": 0, "passive_packets_seen": 0}
 
-    # passively collect mdns
-    mdns_ips = passive_mdns_collect(MDNS_LISTEN_SEC)
+    loop = asyncio.get_event_loop()
+    mdns_task = loop.run_in_executor(None, passive_mdns_collect, MDNS_LISTEN_SEC)
+    arp_task = loop.run_in_executor(None, arp_scan, cidr, 2)
+    mdns_ips, arp_results = await asyncio.gather(mdns_task, arp_task)
     health["passive_packets_seen"] = len(mdns_ips)
 
-    arp_results = arp_scan(cidr, timeout=2)
-    devices = load_devices()  # dict keyed by key (mac/ip)
+    devices = load_devices()
     seen_keys = set()
+    events = []
 
-    # build a quick map of mdns presence
     mdns_set = set(mdns_ips)
+    enrich_tasks = [enrich_and_update_for_entry(devices, ipaddr, mac, ipaddr in mdns_set, events) for ipaddr, mac in arp_results]
+    completed_keys = await asyncio.gather(*enrich_tasks)
+    seen_keys.update(completed_keys)
 
-    # spawn enrichment tasks per ARP result
-    tasks = []
-    for ipaddr, mac in arp_results:
-        mdns_seen = ipaddr in mdns_set
-        tasks.append(enrich_and_update_for_entry(devices, ipaddr, mac, mdns_seen))
-
-    # if mdns-only IPs exist (not in ARP results), add them
-    # process ARP tasks first
-    if tasks:
-        completed = await asyncio.gather(*tasks, return_exceptions=False)
-        for k in completed:
-            seen_keys.add(k)
-
-    # process mdns-only discovered IPs
+    # mdns-only entries
     for mip in mdns_ips:
-        # skip if present already by ip
         existing_key = find_existing_key_by_mac_or_ip(devices, "", mip)
         if existing_key:
-            # mark seen
             seen_keys.add(existing_key)
             rec = devices[existing_key]
             if "mdns" not in rec.get("discovery_sources", []):
@@ -407,19 +355,14 @@ async def do_scan_and_write():
             rec = compute_confidence_and_evidence(rec)
             devices[existing_key] = rec
         else:
-            # create mdns-only entry
-            hostname = resolve_hostname(mip)
+            hostname = await async_resolve_hostname(mip)
             rec = make_device_record(mip, "", hostname=hostname, sources=["mdns"], vendor="")
             rec = compute_confidence_and_evidence(rec)
-            key = mip
-            devices[key] = rec
-            seen_keys.add(key)
-            append_event({"timestamp": now_ts(), "type": "device_added_mdns", "device_ip": mip, "mac": ""})
+            devices[mip] = rec
+            seen_keys.add(mip)
+            events.append({"timestamp": now_ts(), "type": "device_added_mdns", "device_ip": mip, "mac": ""})
 
-    # apply offline/online logic
-    devices = apply_status_logic(devices, seen_keys, OFFLINE_THRESHOLD)
-
-    # health metrics
+    devices = apply_status_logic(devices, seen_keys, OFFLINE_THRESHOLD, events)
     devices_list = list(devices.values())
     health["devices_found"] = len(devices_list)
     health["online_count"] = sum(1 for d in devices_list if d.get("status") == "online")
@@ -427,9 +370,11 @@ async def do_scan_and_write():
     health["notes"] = "scan complete"
 
     save_devices(devices)
+    save_events(load_events() + events)
     save_health(health)
-
     send_full_snapshot()
+    for evt in events:
+        send_event_to_backend(evt)
 
     print(f"[{now_ts()}] Scan complete: {health['online_count']} online, {health['offline_count']} offline")
     return health
@@ -442,15 +387,9 @@ async def periodic_scanner():
             print("Scan error:", e)
         await asyncio.sleep(SCAN_INTERVAL)
 
-
+# ---------- Backend / snapshot ----------
 def load_json_file(path):
-    if os.path.exists(path):
-        try:
-            with open(path, "r") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
+    return load_json_or(path, {})
 
 def send_full_snapshot():
     snapshot = {
@@ -467,7 +406,6 @@ def send_full_snapshot():
 
 def send_event_to_backend(evt: dict):
     try:
-        # simple POST, timeout short to not block
         requests.post(API_URL_BASE + '/event', json=evt, timeout=3)
         print(f"[📡] Event sent: {evt.get('type')}")
     except Exception as e:
@@ -476,7 +414,6 @@ def send_event_to_backend(evt: dict):
 # ---------- FastAPI endpoints ----------
 @app.on_event("startup")
 async def startup_event():
-    # start periodic scanner
     loop = asyncio.get_event_loop()
     loop.create_task(periodic_scanner())
 
@@ -495,7 +432,6 @@ async def get_health():
 
 # ---------- Port utility ----------
 def find_free_port(preferred: int = PREFERRED_PORT) -> int:
-    # try preferred first
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.bind(("0.0.0.0", preferred))
@@ -506,7 +442,6 @@ def find_free_port(preferred: int = PREFERRED_PORT) -> int:
             s.close()
         except:
             pass
-    # find ephemeral
     s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s2.bind(("0.0.0.0", 0))
     port = s2.getsockname()[1]
