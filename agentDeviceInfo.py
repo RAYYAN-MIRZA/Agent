@@ -39,8 +39,31 @@ def get_device_info():
         "hostname": socket.gethostname(),
         "ip_address": get_ip_address(),
         "mac_address": get_mac_address(),
-        "os": platform.platform(),
+        "os": get_os(),
     }
+
+def get_os():
+    if platform.system() != "Windows":
+        return f"{platform.system()} {platform.release()}"
+
+    try:
+        import wmi
+
+        # Create debug file immediately
+        debug_file = Path("debug_os_info.txt")
+        debug_file.write_text("Attempting to fetch OS info using WMI...\n")
+
+        c = wmi.WMI()
+        os_list = c.Win32_OperatingSystem()
+        debug_file.write_text(f"Fetched OS list: {os_list}\n")  # overwrite with actual output
+
+        os_info = os_list[0]
+        print("INFO", os_info)
+        return f"{os_info.Caption} (Build {os_info.BuildNumber})"
+    except Exception as e:
+        Path("debug_os_info.txt").write_text(f"Error fetching OS info: {e}\n")
+        # fallback
+        return platform.platform()
 
 def save_to_json(data):
     file_path = Path("device_info.json")
