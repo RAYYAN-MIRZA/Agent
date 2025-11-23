@@ -1,8 +1,7 @@
-# helpers.py
 import os
 import json
-import platform
-import subprocess
+import asyncio
+import aioping
 
 def save_json_atomic(path, obj):
     tmp = path + ".tmp"
@@ -10,23 +9,15 @@ def save_json_atomic(path, obj):
         json.dump(obj, f, indent=2)
     os.replace(tmp, path)
 
-def ping_ip(ip: str, timeout=1000):
-    """Cross-platform ping."""
-    system = platform.system().lower()
-
+async def ping_ip(ip: str, timeout=1000):
+    """
+    Ultra-fast async ICMP ping.
+    Returns True if host responds.
+    """
     try:
-        if system == "windows":
-            cmd = ["ping", "-n", "1", "-w", str(timeout), ip]
-        else:
-            # Linux / MacOS
-            cmd = ["ping", "-c", "1", "-W", str(timeout // 1000), ip]
-
-        subprocess.check_output(
-            cmd,
-            stderr=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL
-        )
+        await aioping.ping(ip, timeout=timeout / 1000.0)
         return True
-
-    except:
+    except TimeoutError:
+        return False
+    except Exception:
         return False

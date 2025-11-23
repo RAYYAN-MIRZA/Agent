@@ -1,4 +1,3 @@
-# main.py
 import asyncio
 from network_info import get_network_info
 from device_discovery import start_discovery
@@ -11,16 +10,16 @@ async def main():
         print("[-] No valid network interface found!")
         return
 
-    # Pick the FIRST network (you can later add UI to select)
-    cidr = networks[0]["cidr"]
-    iface = networks[0]["interface"]
+    # Adjust the network index if required
+    cidr = networks[1]["cidr"]
+    iface = networks[1]["interface"]
 
     print(f"[+] Using subnet {cidr} on interface {iface}")
 
-    # Start status monitor loop
+    # Status monitor (pings every 10s)
     asyncio.create_task(monitor_statuses())
 
-    # Start dynamic ARP + Nmap discovery
+    # Start ARP + Nmap discovery system
     await start_discovery(
         cidr=cidr,
         iface=iface,
