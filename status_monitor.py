@@ -23,52 +23,45 @@ async def arp_fallback(ip, iface=None):
 
 
 async def check_device(ip, mac):
-    # ICMP fast ping
+    """Check if device is online."""
     alive = await ping_ip(ip, timeout=400)
-
-    # ARP fallback if ICMP fails
     if not alive:
         alive = await arp_fallback(ip)
 
-    return {
-        "ip": ip,
-        "mac": mac,
-        "status": "online" if alive else "offline",
-        "lastSeen": time.time(),
-    }
+    return alive
+
+
+# In-memory cache for real-time status
+status_cache = {}
+cache_lock = asyncio.Lock()
+
+
+async def save_status(ip, mac, alive):
+    """Update in-memory cache and write to disk."""
+    async with cache_lock:
+        entry = status_cache.get(ip, {"ip": ip, "mac": mac, "lastSeen": None})
+        entry["status"] = "online" if alive else "offline"
+        if alive:
+            entry["lastSeen"] = time.time()  # update last online time only if alive
+        status_cache[ip] = entry
+
+        save_json_atomic(STATUSES_FILE, list(status_cache.values()))
 
 
 async def ping_worker():
-    """Processes device pings in parallel."""
     while True:
         ip, mac = await queue.get()
         try:
-            result = await check_device(ip, mac)
-
-            # Save immediately (non-blocking)
-            await save_status(result)
-
+            alive = await check_device(ip, mac)
+            await save_status(ip, mac, alive)
         except Exception as e:
             print(f"[!] Status worker error: {e}")
         finally:
             queue.task_done()
 
 
-# In-memory cache for real-time updates
-status_cache = {}
-cache_lock = asyncio.Lock()
-
-
-async def save_status(entry):
-    """Maintain in-memory cache and flush to disk."""
-    async with cache_lock:
-        status_cache[entry["ip"]] = entry
-        save_json_atomic(STATUSES_FILE, list(status_cache.values()))
-
-
 async def monitor_statuses():
-    """Main loop"""
-    # Start workers
+    # Start ping workers
     for _ in range(PING_WORKERS):
         asyncio.create_task(ping_worker())
 
@@ -81,8 +74,7 @@ async def monitor_statuses():
             except:
                 devices = []
 
-        # Push devices into the ping queue
         for d in devices:
             queue.put_nowait((d["ip"], d["mac"]))
 
-        await asyncio.sleep(1)  # Real-time update
+        await asyncio.sleep(1)  # run every 1 second
