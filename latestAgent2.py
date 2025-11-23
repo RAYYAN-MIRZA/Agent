@@ -40,6 +40,8 @@ import sys
 import platform
 
 import requests
+import netifaces
+import psutil
 
 # ---------- Config ----------
 API_URL_BASE = "http://192.168.100.34:5017/api/agent"
@@ -152,7 +154,10 @@ def make_device_record(ip: str, mac: str, hostname: str = "", sources=None, port
         "open_ports": ports or [],
         "evidence": [],
         "confidence": 0,
-        "status": "online"
+        "status": "online",
+        "network_id": "",
+        "broadcast_id": "",
+        "subnet_cidr": ""
     }
 
 def compute_confidence_and_evidence(device: dict) -> dict:
@@ -184,10 +189,11 @@ def compute_confidence_and_evidence(device: dict) -> dict:
     return device
 
 # ---------- ARP + mDNS ----------
-def arp_scan(cidr: str, timeout=2) -> List[Tuple[str, str]]:
+def arp_scan(cidr: str, timeout=2, iface=None) -> List[Tuple[str, str]]:
     # returns list of tuples (ip, mac)
-    packet = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=cidr)
-    ans, _ = srp(packet, timeout=timeout, retry=1)
+    packet = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=cidr)    
+    ans, _ = srp(packet, timeout=timeout, retry=1, iface=iface)
+
     results = []
     for _, r in ans:
         results.append((r.psrc, r.hwsrc))
@@ -275,7 +281,7 @@ def find_existing_key_by_mac_or_ip(devices: Dict[str, dict], mac: str, ip: str) 
             return k
     return ""
 
-async def enrich_and_update_for_entry(devices: Dict[str, dict], ipaddr: str, mac: str, mdns_seen: bool):
+async def enrich_and_update_for_entry(devices: Dict[str, dict], ipaddr: str, mac: str, mdns_seen: bool, netinfo: dict):
     # determine key (merge logic)
     key = find_existing_key_by_mac_or_ip(devices, mac, ipaddr) or (mac or ipaddr)
     rec = devices.get(key)
@@ -323,6 +329,12 @@ async def enrich_and_update_for_entry(devices: Dict[str, dict], ipaddr: str, mac
     # vendor refresh
     if not rec.get("vendor"):
         rec["vendor"] = vendor
+    
+    # add network info per device
+    rec["network_id"] = netinfo.get("network_id")
+    rec["broadcast_id"] = netinfo.get("broadcast_id")
+    rec["subnet_cidr"] = netinfo.get("cidr")
+
 
     # recompute confidence
     rec = compute_confidence_and_evidence(rec)
@@ -365,15 +377,25 @@ def apply_status_logic(devices: Dict[str, dict], seen_keys: set, offline_thresho
 
 # ---------- Main scan & periodic task ----------
 async def do_scan_and_write():
-    ip = get_default_ipv4_interface_ip()
-    cidr = make_cidr_for_ip(ip)
-    health = {"scan_time": now_ts(), "subnet": cidr, "devices_found": 0, "passive_packets_seen": 0}
+    netinfo = get_local_network_info()
+    cidr = netinfo.get("cidr")
+
+    if not cidr:
+    # fallback — extremely rare
+        ip = get_default_ipv4_interface_ip()
+        cidr = make_cidr_for_ip(ip)
+
+    health = {"scan_time": now_ts(), "subnet": cidr, "devices_found": 0, "passive_packets_seen": 0, "network_id": netinfo.get("network_id"),
+            "broadcast_id": netinfo.get("broadcast_id"),
+            "netmask": netinfo.get("netmask"),
+            "cidr": netinfo.get("cidr"),
+            }
 
     # passively collect mdns
     mdns_ips = passive_mdns_collect(MDNS_LISTEN_SEC)
     health["passive_packets_seen"] = len(mdns_ips)
 
-    arp_results = arp_scan(cidr, timeout=2)
+    arp_results = arp_scan(cidr, timeout=2, iface=normalize_interface_name(netinfo.get("interface")))
     devices = load_devices()  # dict keyed by key (mac/ip)
     seen_keys = set()
 
@@ -384,7 +406,7 @@ async def do_scan_and_write():
     tasks = []
     for ipaddr, mac in arp_results:
         mdns_seen = ipaddr in mdns_set
-        tasks.append(enrich_and_update_for_entry(devices, ipaddr, mac, mdns_seen))
+        tasks.append(enrich_and_update_for_entry(devices, ipaddr, mac, mdns_seen, netinfo))
 
     # if mdns-only IPs exist (not in ARP results), add them
     # process ARP tasks first
@@ -512,6 +534,81 @@ def find_free_port(preferred: int = PREFERRED_PORT) -> int:
     port = s2.getsockname()[1]
     s2.close()
     return port
+
+
+def get_local_network_info():
+    """
+    Returns:
+        {
+            "interface": "eth0",
+            "ip": "192.168.100.20",
+            "netmask": "255.255.255.0",
+            "cidr": "192.168.100.0/24",
+            "network_id": "...",
+            "broadcast_id": "..."
+        }
+    """
+    info = {
+        "interface": None,
+        "ip": None,
+        "netmask": None,
+        "cidr": None,
+        "network_id": None,
+        "broadcast_id": None
+    }
+
+    try:
+        gws = netifaces.gateways()
+        default_iface = gws['default'][netifaces.AF_INET][1]  # THIS gets interface name
+        info["interface"] = default_iface
+    except Exception:
+        return info
+
+    addrs = netifaces.ifaddresses(default_iface).get(netifaces.AF_INET, [])
+    if not addrs:
+        return info
+
+    addr = addrs[0]
+    ip = addr.get('addr')
+    netmask = addr.get('netmask')
+
+    if not ip or not netmask:
+        return info
+
+    try:
+        net = ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False)
+        info["ip"] = ip
+        info["netmask"] = netmask
+        info["cidr"] = str(net)
+        info["network_id"] = str(net.network_address)
+        info["broadcast_id"] = str(net.broadcast_address)
+    except:
+        pass
+
+    return info
+
+
+
+def normalize_interface_name(iface):
+    """
+    On Windows, netifaces sometimes returns a GUID like {DAA8...}
+    This converts it to real interface name (Wi-Fi, Ethernet).
+    On Linux, returns iface unchanged.
+    """
+    # Linux & Mac: return as is
+    if platform.system() != "Windows":
+        return iface
+
+    # Windows: map GUID -> friendly name
+    for ni, addrs in psutil.net_if_addrs().items():
+        # psutil gives friendly names ("Wi-Fi", "Ethernet")
+        # netifaces gives GUIDs ("{DAA8...}")
+        for addr in addrs:
+            if iface.lower() in addr.address.lower():
+                return ni
+
+    # fallback: return iface unchanged
+    return iface
 
 # ---------- Run ----------
 if __name__ == "__main__":
