@@ -1,12 +1,19 @@
 import asyncio, json, os, time
+
+from dotenv import load_dotenv
 from helpers import ping_ip, save_json_atomic
 from scapy.all import ARP, Ether, srp
+
+
+load_dotenv()
+
+AGENT_HUB_URL = os.getenv("AGENT_HUB_URL")
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 20))
+PING_WORKERS = int(os.getenv("PING_WORKERS", 50)) # Ping concurrency limit
 
 IP_MAC_FILE = "data/ip_mac.json"
 STATUSES_FILE = "data/statuses.json"
 
-# Ping concurrency limit
-PING_WORKERS = 50
 queue = asyncio.Queue()
 
 
@@ -60,7 +67,7 @@ async def ping_worker():
             queue.task_done()
 
 
-async def monitor_statuses():
+async def monitor_statuses(interval = 10):
     # Start ping workers
     for _ in range(PING_WORKERS):
         asyncio.create_task(ping_worker())
@@ -77,4 +84,4 @@ async def monitor_statuses():
         for d in devices:
             queue.put_nowait((d["ip"], d["mac"]))
 
-        await asyncio.sleep(1)  # run every 1 second
+        await asyncio.sleep(interval)

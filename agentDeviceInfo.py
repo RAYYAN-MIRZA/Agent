@@ -72,9 +72,9 @@ def save_to_json(data):
     print(f"[+] Device info saved to {file_path.absolute()}")
 
 def main():
-    if not is_admin():
-        print("[!] Admin privileges required. Requesting elevation...")
-        elevate()
+    # if not is_admin():
+    #     print("[!] Admin privileges required. Requesting elevation...")
+    #     elevate()
 
     print("[+] Running with admin privileges.")
     device_info = get_device_info()
