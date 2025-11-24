@@ -4,6 +4,8 @@ from dotenv import load_dotenv
 from helpers import ping_ip, save_json_atomic
 from scapy.all import ARP, Ether, srp
 
+from redis.asyncio import Redis
+
 
 load_dotenv()
 
@@ -13,6 +15,16 @@ PING_WORKERS = int(os.getenv("PING_WORKERS", 50)) # Ping concurrency limit
 
 IP_MAC_FILE = "data/ip_mac.json"
 STATUSES_FILE = "data/statuses.json"
+REDIS_HOST = os.getenv("REDIS_HOST", "192.168.100.34")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+
+
+redis_client = Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    decode_responses=True
+)
+
 
 queue = asyncio.Queue()
 
@@ -54,6 +66,11 @@ async def save_status(ip, mac, alive):
 
         save_json_atomic(STATUSES_FILE, list(status_cache.values()))
 
+        try:
+            await publish_status_to_redis(ip, mac, alive)
+        except Exception as e:
+            print(f"[!] Redis publish error: {e}")
+
 
 async def ping_worker():
     while True:
@@ -85,3 +102,13 @@ async def monitor_statuses(interval = 10):
             queue.put_nowait((d["ip"], d["mac"]))
 
         await asyncio.sleep(interval)
+
+
+async def publish_status_to_redis(ip, mac, alive):
+    data = {
+        "ip": ip,
+        "mac": mac,
+        "status": "online" if alive else "offline",
+        "lastSeen": time.time() if alive else None
+    }
+    await redis_client.publish("device-status", json.dumps(data))
