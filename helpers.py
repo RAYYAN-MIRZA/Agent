@@ -24,6 +24,28 @@ async def ping_ip(ip: str, timeout=1000):
     except Exception:
         return False
     
+def parse_kv_string(s: str) -> dict:
+    """
+    Convert a string like:
+    "NetBIOS name: UMER, NetBIOS user: <unknown>, NetBIOS MAC: 68:54:5a:81:f2:63"
+    into a proper dict:
+    {
+        "NetBIOS name": "UMER",
+        "NetBIOS user": "<unknown>",
+        "NetBIOS MAC": "68:54:5a:81:f2:63"
+    }
+    """
+    result = {}
+    parts = [p.strip() for p in s.split(",")]
+    for part in parts:
+        if ":" in part:
+            k, v = part.split(":", 1)
+            result[k.strip()] = v.strip()
+        else:
+            # fallback: store as raw string
+            result[part] = None
+    return result
+
 async def send_network_info(url, network_data, max_retries=5, retry_interval=10):
     """
     Sends network info to the backend via POST.
@@ -59,52 +81,52 @@ async def send_network_info(url, network_data, max_retries=5, retry_interval=10)
                     raise RuntimeError("Failed to send network info after multiple attempts") from e
                 
 
-def xml_to_dict(element):
+def xml_to_json_fully(element):
     """
-    Recursively convert an ElementTree element into a dict.
-    Handles attributes, text, and child elements.
+    Generic XML → JSON parser.
+    Converts attributes and text.
+    If text looks like key: value, it parses into dict.
     """
     node = {}
-    
-    # Add element attributes first
-    if element.attrib:
-        node.update({f"@{k}": v for k, v in element.attrib.items()})
-    
-    # Process children
+
+    # Attributes
+    for k, v in element.attrib.items():
+        node[f"@{k}"] = str(v)
+
+    # Children
     children = list(element)
-    if children:
-        child_dict = {}
-        for child in children:
-            child_name = child.tag
-            child_value = xml_to_dict(child)
-            
-            # Handle multiple children with same tag
-            if child_name in child_dict:
-                if type(child_dict[child_name]) is list:
-                    child_dict[child_name].append(child_value)
-                else:
-                    child_dict[child_name] = [child_dict[child_name], child_value]
+    for child in children:
+        child_name = child.tag
+        child_value = xml_to_json_fully(child)
+
+        # Handle multiple children with same tag
+        if child_name in node:
+            if isinstance(node[child_name], list):
+                node[child_name].append(child_value)
             else:
-                child_dict[child_name] = child_value
-        
-        node.update(child_dict)
-    
-    # Add text if element has text
+                node[child_name] = [node[child_name], child_value]
+        else:
+            node[child_name] = child_value
+
+    # Text
     text = element.text.strip() if element.text else ""
-    if text and children:
-        node["#text"] = text
-    elif text:
-        return text
-    
+    if text:
+        # Try parse key-value strings automatically
+        if ":" in text and not children and not element.attrib:
+            kv_parsed = parse_kv_string(text)
+            return kv_parsed
+        else:
+            if children or element.attrib:
+                node["#text"] = text
+            else:
+                return text
+
     return node
 
 def nmap_xml_to_json(xml_str: str) -> dict:
-    """
-    Convert Nmap XML output string to a fully nested JSON-like dict.
-    """
     try:
         root = ET.fromstring(xml_str)
     except ET.ParseError:
         return {"error": "Invalid XML"}
-    
-    return {root.tag: xml_to_dict(root)}
+
+    return {root.tag: xml_to_json_fully(root)}
