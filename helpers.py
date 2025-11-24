@@ -3,6 +3,7 @@ import json
 import asyncio
 import aioping
 import aiohttp
+import xml.etree.ElementTree as ET
 
 def save_json_atomic(path, obj):
     tmp = path + ".tmp"
@@ -56,3 +57,54 @@ async def send_network_info(url, network_data, max_retries=5, retry_interval=10)
                     await asyncio.sleep(retry_interval)
                 else:
                     raise RuntimeError("Failed to send network info after multiple attempts") from e
+                
+
+def xml_to_dict(element):
+    """
+    Recursively convert an ElementTree element into a dict.
+    Handles attributes, text, and child elements.
+    """
+    node = {}
+    
+    # Add element attributes first
+    if element.attrib:
+        node.update({f"@{k}": v for k, v in element.attrib.items()})
+    
+    # Process children
+    children = list(element)
+    if children:
+        child_dict = {}
+        for child in children:
+            child_name = child.tag
+            child_value = xml_to_dict(child)
+            
+            # Handle multiple children with same tag
+            if child_name in child_dict:
+                if type(child_dict[child_name]) is list:
+                    child_dict[child_name].append(child_value)
+                else:
+                    child_dict[child_name] = [child_dict[child_name], child_value]
+            else:
+                child_dict[child_name] = child_value
+        
+        node.update(child_dict)
+    
+    # Add text if element has text
+    text = element.text.strip() if element.text else ""
+    if text and children:
+        node["#text"] = text
+    elif text:
+        return text
+    
+    return node
+
+def nmap_xml_to_json(xml_str: str) -> dict:
+    """
+    Convert Nmap XML output string to a fully nested JSON-like dict.
+    """
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return {"error": "Invalid XML"}
+    
+    return {root.tag: xml_to_dict(root)}

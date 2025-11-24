@@ -4,6 +4,8 @@ import os
 import time
 import ipaddress
 from scapy.all import ARP, Ether, srp
+from helpers import nmap_xml_to_json
+
 
 DATA_DIR = "data"
 IP_MAC_FILE = os.path.join(DATA_DIR, "ip_mac.json")
@@ -49,13 +51,14 @@ async def run_nmap(ip):
     async with NMAP_SEMAPHORE:
         def _run():
             import subprocess
-            cmd = ["nmap", "-O", "-A", "-T4", ip]
+            cmd = ["nmap", "-O", "-A", "-T3", "-oX", "-", ip]  # output as XML
             try:
                 return subprocess.check_output(cmd, universal_newlines=True)
             except Exception as e:
-                return f"Nmap failed: {e}"
+                return f"<nmap_error>{e}</nmap_error>"
 
-        result = await loop.run_in_executor(None, _run)
+        result_raw = await loop.run_in_executor(None, _run)
+        result_json = nmap_xml_to_json(result_raw)
 
         async with file_lock:
             data = []
@@ -71,7 +74,8 @@ async def run_nmap(ip):
             if existing is None:
                 data.append({
                     "ip": ip,
-                    "nmap_output": result,
+                    "nmap_output_raw": result_raw,
+                    "nmap_output_json": result_json,
                     "scannedOn": time.time()
                 })
                 save_json_atomic(NMAP_FILE, data)
