@@ -66,10 +66,10 @@ async def save_status(ip, mac, alive):
 
         save_json_atomic(STATUSES_FILE, list(status_cache.values()))
 
-        try:
-            await publish_status_to_redis(ip, mac, alive)
-        except Exception as e:
-            print(f"[!] Redis publish error: {e}")
+        # try:
+        #     await publish_status_to_redis(ip, mac, alive)
+        # except Exception as e:
+        #     print(f"[!] Redis publish error: {e}")
 
 
 async def ping_worker():

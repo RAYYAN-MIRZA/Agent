@@ -51,7 +51,7 @@ async def run_nmap(ip):
     async with NMAP_SEMAPHORE:
         def _run():
             import subprocess
-            cmd = ["nmap", "-O", "-A", "-T3", "-oX", "-", ip]  # output as XML
+            cmd = ["nmap", "-O", "-A", "-oX", "-", ip]  # output as XML
             try:
                 return subprocess.check_output(cmd, universal_newlines=True)
             except Exception as e:

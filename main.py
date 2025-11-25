@@ -37,7 +37,7 @@ async def main():
     }
 
 
-    await send_network_info(API_BASE_URL+"/agent/network-info", network_info_payload)
+    # await send_network_info(API_BASE_URL+"/agent/network-info", network_info_payload)
 
 
     asyncio.create_task(monitor_statuses())
