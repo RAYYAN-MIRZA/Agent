@@ -1,3 +1,4 @@
+#main.py
 import asyncio
 from network_info import get_network_info
 from device_discovery import start_discovery
