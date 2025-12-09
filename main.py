@@ -1,55 +1,46 @@
-#main.py
+# main.py
 import asyncio
-from network_info import get_network_info
-from device_discovery import start_discovery
-from status_monitor import monitor_statuses
+from aiohttp import web
+import json
 
-from dotenv import load_dotenv
-import os
+from job1 import run_job as run_job1
+from job2 import run_job as run_job2
 
-from helpers import send_network_info
-
-load_dotenv()
-
-AGENT_HUB_URL = os.getenv("AGENT_HUB_URL")
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 20))
-PING_WORKERS = int(os.getenv("PING_WORKERS", 50))
-PING_INTERVAL = int(os.getenv("PING_INTERVAL", 5))
-API_BASE_URL = os.getenv("API_BASE_URL")
-
-async def main():
-    networks = get_network_info()
-
-    if not networks:
-        print("[-] No valid network interface found!")
-        return
-
-    # Adjust the network index if required
-    network = networks[1]
-    cidr = network["cidr"]
-    iface = network["interface"]
-
-    print(f"[+] Using subnet {cidr} on interface {iface}")
-
-    network_info_payload = {
-        "Mask": network["netmask"],
-        "NetworkId": cidr,
-        "BroadcastId": network["broadcastId"]
-    }
+routes = web.RouteTableDef()
 
 
-    # await send_network_info(API_BASE_URL+"/agent/network-info", network_info_payload)
+@routes.post("/run-job")
+async def handle_job(request):
+    try:
+        data = await request.json()
+
+        job_id = data.get("jobId")
+        job_payload = data.get("jobPayload", {})
+
+        if not job_id:
+            return web.json_response({"success": False, "error": "jobId is required"}, status=400)
+
+        # Dispatch Jobs
+        if job_id == 1:
+            asyncio.create_task(run_job1(job_payload))
+            return web.json_response({"success": True, "message": "Job 1 started"})
+
+        elif job_id == 2:
+            asyncio.create_task(run_job2(job_payload))
+            return web.json_response({"success": True, "message": "Job 2 started"})
+
+        else:
+            return web.json_response({"success": False, "error": "Invalid jobId"}, status=400)
+
+    except Exception as e:
+        return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-    asyncio.create_task(monitor_statuses())
+async def init_app():
+    app = web.Application()
+    app.add_routes(routes)
+    return app
 
-    # Start ARP + Nmap discovery system
-    await start_discovery(
-        cidr=cidr,
-        iface=iface,
-        scan_interval=SCAN_INTERVAL,
-        worker_count=3
-    )
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    web.run_app(init_app(), port=8000)
