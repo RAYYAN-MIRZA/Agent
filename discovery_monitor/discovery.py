@@ -1,50 +1,32 @@
-# device_discovery.py
 import asyncio
 import json
-import os
 import time
 import ipaddress
+
 from scapy.all import ARP, Ether, srp
-from helpers import nmap_xml_to_json
 
-
-DATA_DIR = "data"
-IP_MAC_FILE = os.path.join(DATA_DIR, "ip_mac.json")
-NMAP_FILE = os.path.join(DATA_DIR, "nmap_results.json")
-os.makedirs(DATA_DIR, exist_ok=True)
+from . import config
+from .helpers import nmap_xml_to_json, save_json_atomic
 
 file_lock = asyncio.Lock()
-
-# Queue 1 → fast discovery results
-queue = asyncio.Queue()
-
-# Queue 2 → slow Nmap scanning
-nmap_queue = asyncio.Queue()
-
-# Nmap concurrency limiter
-NMAP_SEMAPHORE = asyncio.Semaphore(3)
-
-
-def save_json_atomic(path, obj):
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(obj, f, indent=2)
-    os.replace(tmp, path)
+queue: asyncio.Queue = asyncio.Queue()
+nmap_queue: asyncio.Queue = asyncio.Queue()
+NMAP_SEMAPHORE = asyncio.Semaphore(config.NMAP_PARALLEL)
 
 
 async def write_ip_mac(ip, mac):
     async with file_lock:
         data = []
-        if os.path.exists(IP_MAC_FILE):
+        if config.IP_MAC_JSON.exists():
             try:
-                with open(IP_MAC_FILE, "r") as f:
+                with open(config.IP_MAC_JSON, "r", encoding="utf-8") as f:
                     data = json.load(f)
-            except:
+            except Exception:
                 pass
 
         if not any(d.get("ip") == ip for d in data):
             data.append({"ip": ip, "mac": mac, "discoveredOn": time.time()})
-            save_json_atomic(IP_MAC_FILE, data)
+            save_json_atomic(config.IP_MAC_JSON, data)
 
 
 async def run_nmap(ip):
@@ -52,7 +34,8 @@ async def run_nmap(ip):
     async with NMAP_SEMAPHORE:
         def _run():
             import subprocess
-            cmd = ["nmap", "-O", "-A", "-oX", "-", ip]  # output as XML
+
+            cmd = ["nmap", "-O", "-A", "-oX", "-", ip]
             try:
                 return subprocess.check_output(cmd, universal_newlines=True)
             except Exception as e:
@@ -63,35 +46,32 @@ async def run_nmap(ip):
 
         async with file_lock:
             data = []
-            if os.path.exists(NMAP_FILE):
+            if config.NMAP_JSON.exists():
                 try:
-                    with open(NMAP_FILE, "r") as f:
+                    with open(config.NMAP_JSON, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                except:
+                except Exception:
                     pass
 
-            # Avoid duplicate Nmap results
-            existing = next((d for d in data if d["ip"] == ip), None)
+            existing = next((d for d in data if d.get("ip") == ip), None)
             if existing is None:
-                data.append({
-                    "ip": ip,
-                    "nmap_output_raw": result_raw,
-                    "nmap_output_json": result_json,
-                    "scannedOn": time.time()
-                })
-                save_json_atomic(NMAP_FILE, data)
+                data.append(
+                    {
+                        "ip": ip,
+                        "nmap_output_raw": result_raw,
+                        "nmap_output_json": result_json,
+                        "scannedOn": time.time(),
+                    }
+                )
+                save_json_atomic(config.NMAP_JSON, data)
 
 
 async def handle_discovered_device(ip, mac):
-    # Store device entry
     await write_ip_mac(ip, mac)
-
-    # Send IP to Nmap queue → fully decoupled, non-blocking
     nmap_queue.put_nowait(ip)
 
 
 async def arp_ping(ip, iface=None, timeout=1):
-    """Simple ARP ping executed using threads."""
     loop = asyncio.get_event_loop()
 
     def sync_ping():
@@ -102,12 +82,13 @@ async def arp_ping(ip, iface=None, timeout=1):
     return await loop.run_in_executor(None, sync_ping)
 
 
-async def arp_scan_fast(cidr: str, iface=None, concurrency=50):
+async def arp_scan_fast(cidr: str, iface=None, concurrency=None):
+    concurrency = concurrency if concurrency is not None else config.ARP_CONCURRENCY
     subnet = ipaddress.IPv4Network(cidr, strict=False)
     tasks = [arp_ping(str(ip), iface) for ip in subnet.hosts()]
 
-    # Run ARP pings in chunks
-    for chunk in [tasks[i:i+concurrency] for i in range(0, len(tasks), concurrency)]:
+    for i in range(0, len(tasks), concurrency):
+        chunk = tasks[i : i + concurrency]
         results = await asyncio.gather(*chunk)
         for res in results:
             for ip, mac in res:
@@ -115,39 +96,37 @@ async def arp_scan_fast(cidr: str, iface=None, concurrency=50):
 
 
 async def worker():
-    """Fast worker for processing discovered ARP results."""
     while True:
         ip, mac = await queue.get()
         try:
             await handle_discovered_device(ip, mac)
         except Exception as e:
-            print(f"[!] Worker error for {ip}: {e}")
+            print(f"[discovery] worker error for {ip}: {e}")
         finally:
             queue.task_done()
 
 
 async def nmap_worker():
-    """Slow worker dedicated to Nmap scanning."""
     while True:
         ip = await nmap_queue.get()
         try:
             await run_nmap(ip)
         except Exception as e:
-            print(f"[!] Nmap worker error for {ip}: {e}")
+            print(f"[discovery] nmap error for {ip}: {e}")
         finally:
             nmap_queue.task_done()
 
 
-async def start_discovery(cidr="192.168.100.0/24", iface=None, scan_interval=20, worker_count=3):
-    # Start fast workers
+async def run_discovery_loop(cidr: str, iface=None, scan_interval=None, worker_count=None):
+    scan_interval = scan_interval if scan_interval is not None else config.SCAN_INTERVAL
+    worker_count = worker_count if worker_count is not None else config.DISCOVERY_WORKERS
+
     for _ in range(worker_count):
         asyncio.create_task(worker())
 
-    # Start Nmap workers (3 parallel scans)
-    for _ in range(3):
+    for _ in range(config.NMAP_PARALLEL):
         asyncio.create_task(nmap_worker())
 
-    # Main ARP scanning loop
     while True:
         await arp_scan_fast(cidr, iface)
         await asyncio.sleep(scan_interval)
