@@ -1,11 +1,11 @@
-import asyncio
 import html
 import json
+import logging
 import os
 import re
 import xml.etree.ElementTree as ET
 
-import aioping
+logger = logging.getLogger(__name__)
 
 
 def save_json_atomic(path, obj):
@@ -16,14 +16,17 @@ def save_json_atomic(path, obj):
     os.replace(tmp, path)
 
 
-async def ping_ip(ip: str, timeout=1000):
+async def ping_ip(ip: str, timeout_ms: int = 1000) -> bool:
     """Async ICMP ping; returns True if host responds."""
+    import aioping
+
     try:
-        await aioping.ping(ip, timeout=timeout / 1000.0)
+        await aioping.ping(ip, timeout=timeout_ms / 1000.0)
         return True
     except TimeoutError:
         return False
-    except Exception:
+    except Exception as e:
+        logger.debug("ping %s: %s", ip, e)
         return False
 
 

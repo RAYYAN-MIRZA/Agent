@@ -1,4 +1,4 @@
-"""LAN device discovery (ARP + Nmap) and ICMP/ARP liveness monitoring to JSON files."""
+"""LAN device discovery (ARP + optional Nmap) and liveness monitoring to JSON files."""
 
 from . import config
 
