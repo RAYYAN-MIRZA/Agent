@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Agent runtime
+fyp_agent/identity.json
+fyp_agent/config.yaml
+fyp_agent/workdir/

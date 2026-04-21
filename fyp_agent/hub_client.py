@@ -1,0 +1,236 @@
+"""SignalR hub client for the FYP agent.
+
+Wraps ``signalrcore``'s connection builder with auth, heartbeat, auto
+reconnect, and dispatch plumbing. Keeps the executor + state concerns
+orthogonal so the rest of the module is unit-testable without SignalR.
+"""
+from __future__ import annotations
+
+import logging
+import platform
+import threading
+import time
+from datetime import datetime, timezone
+from typing import Optional
+
+from signalrcore.hub_connection_builder import HubConnectionBuilder
+
+from .artifact_uploader import ArtifactUploadError, ArtifactUploader
+from .config import AgentConfig
+from .executor import ExecutionRequest, RunExecutor, pick_primary_artifact
+from .identity_store import AgentIdentity
+
+logger = logging.getLogger(__name__)
+
+
+class AgentHubClient:
+    """Owns the live SignalR connection and dispatches inbound work."""
+
+    def __init__(
+        self,
+        config: AgentConfig,
+        identity: AgentIdentity,
+        executor: RunExecutor,
+        uploader: Optional[ArtifactUploader] = None,
+    ):
+        self.config = config
+        self.identity = identity
+        self.executor = executor
+        self.uploader = uploader or ArtifactUploader(
+            api_base_url=config.api_base_url,
+            agent_token=identity.agent_token,
+            verify_tls=config.verify_tls,
+        )
+
+        self._connection = self._build_connection()
+        self._connected_at: Optional[float] = None
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._stopping = threading.Event()
+
+    # -- public API ------------------------------------------------------
+
+    def start(self) -> None:
+        """Opens the connection and blocks indefinitely until stop() is called."""
+        logger.info("Connecting to %s", self.identity.hub_url)
+        self._connection.start()
+
+        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._heartbeat_thread.start()
+
+        try:
+            while not self._stopping.is_set():
+                time.sleep(1)
+        finally:
+            self._connection.stop()
+
+    def stop(self) -> None:
+        self._stopping.set()
+
+    # -- internals -------------------------------------------------------
+
+    def _build_connection(self):
+        # SignalR clients can't set arbitrary headers on the WebSocket
+        # upgrade in every transport, so we also append the token as a
+        # query string. The backend handler accepts either.
+        url = self.identity.hub_url
+        joiner = "&" if "?" in url else "?"
+        url_with_token = f"{url}{joiner}access_token={self.identity.agent_token}"
+
+        connection = (
+            HubConnectionBuilder()
+            .with_url(
+                url_with_token,
+                options={
+                    "verify_ssl": self.config.verify_tls,
+                    "headers": {"Authorization": f"Bearer {self.identity.agent_token}"},
+                    "skip_negotiation": False,
+                },
+            )
+            .with_automatic_reconnect(
+                {
+                    "type": "raw",
+                    "keep_alive_interval": 15,
+                    "reconnect_interval": 5,
+                    "max_attempts": 10,
+                }
+            )
+            .build()
+        )
+
+        connection.on_open(self._on_open)
+        connection.on_close(self._on_close)
+        connection.on_error(lambda data: logger.error("Hub error: %s", data))
+
+        connection.on("Dispatch", self._on_dispatch)
+        connection.on("Cancel", self._on_cancel)
+        connection.on("HelloAck", self._on_hello_ack)
+
+        return connection
+
+    def _on_open(self) -> None:
+        self._connected_at = time.monotonic()
+        logger.info("Hub connected")
+        self._send_heartbeat(initial=True)
+
+    def _on_close(self) -> None:
+        logger.warning("Hub disconnected")
+
+    def _on_hello_ack(self, args) -> None:
+        if not args or len(args) < 2:
+            return
+        _agent_id, interval = args[0], args[1]
+        logger.info("HelloAck received — server heartbeat interval is %ss", interval)
+        try:
+            self.identity.heartbeat_interval_seconds = int(interval)
+        except (TypeError, ValueError):
+            pass
+
+    def _on_cancel(self, args) -> None:
+        run_id, reason = args[0], args[1] if len(args) > 1 else None
+        logger.info("Cancel requested for run %s (%s)", run_id, reason)
+        # Phase 5 wires a per-run subprocess registry; for Phase 4 the
+        # agent simply logs the request.
+
+    def _on_dispatch(self, args) -> None:
+        if not args:
+            return
+        payload = args[0]
+        try:
+            req = ExecutionRequest(
+                run_id=payload["runId"],
+                correlation_id=payload.get("correlationId", ""),
+                target=payload.get("target", ""),
+                executable=payload["executable"],
+                argv=list(payload.get("argv", [])),
+                timeout_seconds=payload.get("timeoutSeconds"),
+            )
+        except (KeyError, TypeError) as exc:
+            logger.error("Malformed dispatch payload: %s (%s)", payload, exc)
+            return
+
+        worker = threading.Thread(target=self._run_dispatched, args=(req,), daemon=True)
+        worker.start()
+
+    def _run_dispatched(self, req: ExecutionRequest) -> None:
+        logger.info("Dispatched run %s → %s %s", req.run_id, req.executable, " ".join(req.argv))
+
+        self._invoke("RunStarted", {
+            "runId": req.run_id,
+            "startedAt": datetime.now(timezone.utc).isoformat(),
+        })
+
+        def on_output(run_id: str, stream: str, chunk: str, at: datetime) -> None:
+            self._invoke("RunOutput", {
+                "runId": run_id,
+                "stream": stream,
+                "chunk": chunk,
+                "at": at.isoformat(),
+            })
+
+        result = self.executor.execute(req, on_output=on_output)
+
+        # Try to ship the tool's primary artifact to MinIO. Upload failures
+        # don't block completion — we still report to the backend with a
+        # null artifactUri so the run closes out cleanly.
+        artifact_uri: Optional[str] = None
+        primary = pick_primary_artifact(result.artifact_files)
+        if primary is not None:
+            try:
+                upload = self.uploader.upload(
+                    run_id=result.run_id,
+                    artifact_path=primary,
+                    content_type=_content_type_for(primary),
+                )
+                artifact_uri = upload.artifact_uri
+                logger.info("Uploaded artifact for run %s → %s", result.run_id, artifact_uri)
+            except ArtifactUploadError as exc:
+                logger.error("Artifact upload failed for run %s: %s", result.run_id, exc)
+
+        self._invoke("RunCompleted", {
+            "runId": result.run_id,
+            "success": result.success,
+            "exitCode": result.exit_code,
+            "errorMessage": result.error_message,
+            "artifactUri": artifact_uri,
+            "completedAt": result.completed_at.isoformat(),
+        })
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stopping.is_set():
+            time.sleep(max(5, self.identity.heartbeat_interval_seconds))
+            try:
+                self._send_heartbeat(initial=False)
+            except Exception:  # pragma: no cover
+                logger.exception("Heartbeat send failed")
+
+    def _send_heartbeat(self, *, initial: bool) -> None:
+        payload = {
+            "status": "Online",
+            "capabilities": self.config.capabilities,
+        }
+        logger.debug("Heartbeat → %s", payload)
+        self._invoke("Heartbeat", payload)
+
+    def _invoke(self, method: str, payload) -> None:
+        # signalrcore's `send` is fire-and-forget; the hub methods are
+        # `async Task` on the server so we don't need the return value.
+        try:
+            self._connection.send(method, [payload])
+        except Exception:  # pragma: no cover — never kill the agent loop
+            logger.exception("Failed to invoke %s on hub", method)
+
+
+def _default_platform_label() -> str:
+    return f"{platform.system()} {platform.release()}"
+
+
+def _content_type_for(path) -> str:
+    """Rough MIME guess for the common tool output types."""
+    suffix = path.suffix.lower() if hasattr(path, "suffix") else ""
+    return {
+        ".xml": "application/xml",
+        ".json": "application/json",
+        ".txt": "text/plain",
+        ".log": "text/plain",
+        ".pcap": "application/vnd.tcpdump.pcap",
+    }.get(suffix, "application/octet-stream")

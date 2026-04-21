@@ -1,0 +1,22 @@
+# FYP agent sample configuration.
+#
+# Copy this file to ~/.fyp-agent/config.yaml (Linux) or equivalent on
+# Windows, and fill in at least the api_base_url and enrollment_token.
+# Everything in this file can also be set via FYP_AGENT_* env vars.
+
+api_base_url: "http://localhost:5000"
+
+# One-shot enrollment token; obtain via:
+#   curl -X POST http://localhost:5000/api/v1/agents/enrollments \
+#        -H 'Content-Type: application/json' \
+#        -d '{"label":"kali-lab","ttlHours":24}'
+enrollment_token: "paste-token-here"
+
+agent_name: "kali-lab"
+capabilities:
+  - nmap
+  - raw_socket
+
+heartbeat_interval_seconds: 30
+verify_tls: false
+log_level: "INFO"
