@@ -1,0 +1,33 @@
+---
+description: FYP pentesting platform — deployment model, agent types, and roadmap
+alwaysApply: true
+---
+
+# FYP platform architecture
+
+## Control plane vs data plane
+
+- **Cloud (default):** Web app, API, database, orchestration, and reporting live on the cloud.
+- **Edge:** **Local agents** run inside customer networks and communicate **outbound** to the deployed backend (API, SignalR hubs, presigned object storage for artifacts). Prefer outbound-only connectivity from the customer network.
+
+## Agent types
+
+| Type | Deployment | Goals |
+|------|----------------|--------|
+| **Host agent** | Individual devices | Device-scoped posture, host-based checks, endpoint context. |
+| **Network agent** | Network-wide (e.g. dedicated VM/box with visibility) | Discovery, topology-wide mapping, network-oriented scans—different trust and blast radius than host agents. |
+
+Treat each type as a **separate** threat model, privilege model, and update story.
+
+## Product direction
+
+- **Later:** Configuration for **fully local** and **custom** deployments (same codebase; configurable API base URLs, auth, storage, SignalR endpoints)—avoid hardcoding cloud-only assumptions or silent forks.
+- **Multi-tenancy:** Runs, artifacts, and agent identity must stay scoped to **tenant + agent + declared scope**.
+
+## Codebase map (high level)
+
+- **FYP.Backend:** ASP.NET Core API, workers, ingest, hubs for agents.
+- **FYP.UI:** Web console.
+- **Agent / Host.Agent:** Edge clients that execute dispatched work and report back.
+
+When adding features, keep **deployment profiles** (SaaS vs on-prem vs air-gapped) in mind and surface them through **configuration**, not duplicate code paths unless necessary.
