@@ -17,6 +17,7 @@ from signalrcore.hub_connection_builder import HubConnectionBuilder
 
 from .artifact_uploader import ArtifactUploadError, ArtifactUploader
 from .config import AgentConfig
+from .discovery import DiscoveryConfig, DiscoveryRunner
 from .executor import ExecutionRequest, RunExecutor, pick_primary_artifact
 from .identity_store import AgentIdentity
 
@@ -46,6 +47,7 @@ class AgentHubClient:
         self._connected_at: Optional[float] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
+        self._discovery: Optional[DiscoveryRunner] = None
 
     # -- public API ------------------------------------------------------
 
@@ -65,6 +67,8 @@ class AgentHubClient:
 
     def stop(self) -> None:
         self._stopping.set()
+        if self._discovery:
+            self._discovery.stop()
 
     # -- internals -------------------------------------------------------
 
@@ -111,6 +115,7 @@ class AgentHubClient:
         self._connected_at = time.monotonic()
         logger.info("Hub connected")
         self._send_heartbeat(initial=True)
+        self._start_discovery()
 
     def _on_close(self) -> None:
         logger.warning("Hub disconnected")
@@ -210,6 +215,28 @@ class AgentHubClient:
         }
         logger.debug("Heartbeat → %s", payload)
         self._invoke("Heartbeat", payload)
+
+    def _start_discovery(self) -> None:
+        if self._discovery is not None:
+            return
+        network_id = self.identity.network_id
+        if not network_id:
+            logger.warning(
+                "Discovery disabled: missing network_id in identity. "
+                "Re-enroll so the server returns networkId, or set it in state.json."
+            )
+            return
+        discovery_cfg = DiscoveryConfig(
+            enabled=self.config.discovery_enabled,
+            scan_interval_seconds=self.config.discovery_interval_seconds,
+            network_cidr=self.config.discovery_cidr,
+        )
+        self._discovery = DiscoveryRunner(
+            hub_invoke=self._invoke,
+            network_id=network_id,
+            config=discovery_cfg,
+        )
+        self._discovery.start()
 
     def _invoke(self, method: str, payload) -> None:
         # signalrcore's `send` is fire-and-forget; the hub methods are

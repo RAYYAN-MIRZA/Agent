@@ -1,0 +1,11 @@
+__pycache__
+*.pyc
+*.pyo
+.git
+.env
+.venv
+venv
+*.egg-info
+dist
+build
+discovery_monitor/data/

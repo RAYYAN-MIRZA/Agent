@@ -37,6 +37,15 @@ class AgentConfig:
     heartbeat_interval_seconds: int = 30
     """Overridden by the server on enrollment — this is only a fallback."""
 
+    discovery_enabled: bool = True
+    """Run continuous ARP discovery and push results to backend."""
+
+    discovery_interval_seconds: int = 20
+    """Seconds between ARP sweeps."""
+
+    discovery_cidr: Optional[str] = None
+    """If None, auto-detected from default route."""
+
     verify_tls: bool = True
 
     state_dir: Path = field(
@@ -75,14 +84,24 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         "FYP_AGENT_PLATFORM": "platform",
         "FYP_AGENT_LOG_LEVEL": "log_level",
         "FYP_AGENT_VERIFY_TLS": "verify_tls",
+        "FYP_AGENT_DISCOVERY_CIDR": "discovery_cidr",
     }
+    bool_fields = {"verify_tls", "discovery_enabled"}
+    int_fields = {"discovery_interval_seconds"}
     for env_key, field_name in env_map.items():
         if env_key in os.environ:
             raw = os.environ[env_key]
-            if field_name == "verify_tls":
+            if field_name in bool_fields:
                 data[field_name] = raw.lower() in {"1", "true", "yes"}
+            elif field_name in int_fields:
+                data[field_name] = int(raw)
             else:
                 data[field_name] = raw
+
+    if "FYP_AGENT_DISCOVERY_ENABLED" in os.environ:
+        data["discovery_enabled"] = os.environ["FYP_AGENT_DISCOVERY_ENABLED"].lower() in {"1", "true", "yes"}
+    if "FYP_AGENT_DISCOVERY_INTERVAL" in os.environ:
+        data["discovery_interval_seconds"] = int(os.environ["FYP_AGENT_DISCOVERY_INTERVAL"])
 
     if "FYP_AGENT_CAPABILITIES" in os.environ:
         data["capabilities"] = [c.strip() for c in os.environ["FYP_AGENT_CAPABILITIES"].split(",") if c.strip()]

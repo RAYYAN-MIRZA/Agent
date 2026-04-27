@@ -86,4 +86,5 @@ def enroll(config: AgentConfig) -> AgentIdentity:
         agent_name=parsed.agent_name,
         hub_url=parsed.hub_url,
         heartbeat_interval_seconds=parsed.heartbeat_interval_seconds,
+        network_id=parsed.network_id,
     )

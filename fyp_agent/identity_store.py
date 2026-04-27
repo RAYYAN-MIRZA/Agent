@@ -20,6 +20,7 @@ class AgentIdentity:
     agent_name: str
     hub_url: str
     heartbeat_interval_seconds: int = 30
+    network_id: Optional[str] = None
 
 
 def load_identity(state_file: Path) -> Optional[AgentIdentity]:

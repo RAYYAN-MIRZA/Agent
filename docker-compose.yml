@@ -1,0 +1,25 @@
+name: fyp-agent
+
+services:
+  agent:
+    build: .
+    container_name: fyp-agent
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    environment:
+      FYP_AGENT_API_BASE_URL: ${FYP_AGENT_API_BASE_URL:-http://localhost:5017}
+      FYP_AGENT_ENROLLMENT_TOKEN: ${FYP_AGENT_ENROLLMENT_TOKEN:-}
+      FYP_AGENT_NAME: ${FYP_AGENT_NAME:-network-agent}
+      FYP_AGENT_DISCOVERY_ENABLED: "true"
+      FYP_AGENT_DISCOVERY_INTERVAL: ${FYP_AGENT_DISCOVERY_INTERVAL:-20}
+      FYP_AGENT_DISCOVERY_CIDR: ${FYP_AGENT_DISCOVERY_CIDR:-}
+      FYP_AGENT_LOG_LEVEL: ${FYP_AGENT_LOG_LEVEL:-INFO}
+      FYP_AGENT_VERIFY_TLS: ${FYP_AGENT_VERIFY_TLS:-false}
+    volumes:
+      - agent-data:/data
+
+volumes:
+  agent-data:
