@@ -32,6 +32,7 @@ def main() -> int:
     config = load_config()
     _configure_logging(config.log_level)
     log = logging.getLogger("fyp_agent")
+    log.info("Agent config resolved: api=%s, state_file=%s", config.api_base_url, config.state_file)
 
     identity = load_identity(config.state_file)
     if identity is None:

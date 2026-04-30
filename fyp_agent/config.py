@@ -6,6 +6,7 @@ the same binary can run in Docker, bare metal, or CI without editing files.
 from __future__ import annotations
 
 import os
+import pwd
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -48,9 +49,7 @@ class AgentConfig:
 
     verify_tls: bool = True
 
-    state_dir: Path = field(
-        default_factory=lambda: Path(os.environ.get("FYP_AGENT_STATE_DIR", str(Path.home() / ".fyp-agent")))
-    )
+    state_dir: Path = field(default_factory=lambda: _default_state_dir())
 
     log_level: str = "INFO"
 
@@ -68,6 +67,7 @@ class AgentConfig:
 
 def load_config(path: Optional[Path] = None) -> AgentConfig:
     """Load defaults → YAML file → env overrides, then validate."""
+    _load_dotenv()
     cfg_path = path or DEFAULT_CONFIG_PATH
     data: dict = {}
 
@@ -114,3 +114,44 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
     cfg.validate()
     return cfg
+
+
+def _default_state_dir() -> Path:
+    """Resolves the state dir robustly across normal/sudo runs."""
+    explicit = os.environ.get("FYP_AGENT_STATE_DIR")
+    if explicit:
+        return Path(explicit).expanduser()
+
+    # When running via sudo, default to the invoking user's home so state does
+    # not silently split between /root and /home/<user>.
+    sudo_user = os.environ.get("SUDO_USER")
+    if os.geteuid() == 0 and sudo_user:
+        try:
+            sudo_home = Path(pwd.getpwnam(sudo_user).pw_dir)
+            return sudo_home / ".fyp-agent"
+        except KeyError:
+            pass
+
+    return Path.home() / ".fyp-agent"
+
+
+def _load_dotenv() -> None:
+    """Loads KEY=VALUE pairs from .env files into process env if missing."""
+    candidates = [
+        Path.cwd() / ".env",
+        Path(__file__).resolve().parents[1] / ".env",
+    ]
+
+    for env_path in candidates:
+        if not env_path.exists():
+            continue
+
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip("'").strip('"')
+            if key and key not in os.environ:
+                os.environ[key] = value
