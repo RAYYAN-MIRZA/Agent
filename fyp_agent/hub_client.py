@@ -16,6 +16,7 @@ from typing import Optional
 from signalrcore.hub_connection_builder import HubConnectionBuilder
 
 from .artifact_uploader import ArtifactUploadError, ArtifactUploader
+from .capabilities import AgentCapabilities, detect_capabilities
 from .config import AgentConfig
 from .discovery import DiscoveryConfig, DiscoveryRunner
 from .executor import ExecutionRequest, RunExecutor, pick_primary_artifact
@@ -26,6 +27,11 @@ logger = logging.getLogger(__name__)
 
 class AgentHubClient:
     """Owns the live SignalR connection and dispatches inbound work."""
+
+    EXECUTABLE_ALLOWLIST = frozenset([
+        "nmap", "nuclei", "zap-cli", "masscan", "nikto",
+        "testssl.sh", "amass", "subfinder", "httpx",
+    ])
 
     def __init__(
         self,
@@ -42,12 +48,15 @@ class AgentHubClient:
             agent_token=identity.agent_token,
             verify_tls=config.verify_tls,
         )
+        self._capabilities: AgentCapabilities = detect_capabilities(config.capabilities)
 
         self._connection = self._build_connection()
         self._connected_at: Optional[float] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
         self._discovery: Optional[DiscoveryRunner] = None
+        self._active_runs: dict[str, threading.Thread] = {}
+        self._active_runs_lock = threading.Lock()
 
     # -- public API ------------------------------------------------------
 
@@ -153,7 +162,33 @@ class AgentHubClient:
             logger.error("Malformed dispatch payload: %s (%s)", payload, exc)
             return
 
+        if req.executable not in self.EXECUTABLE_ALLOWLIST:
+            logger.warning("Rejected dispatch: executable '%s' not in allowlist", req.executable)
+            self._invoke("RunCompleted", {
+                "runId": req.run_id,
+                "success": False,
+                "exitCode": None,
+                "errorMessage": f"Executable '{req.executable}' not allowed by agent policy",
+                "artifactUri": None,
+                "completedAt": datetime.now(timezone.utc).isoformat(),
+            })
+            return
+
+        if not self._capabilities.has_tool(req.executable):
+            logger.warning("Tool '%s' not available on this agent", req.executable)
+            self._invoke("RunCompleted", {
+                "runId": req.run_id,
+                "success": False,
+                "exitCode": None,
+                "errorMessage": f"Tool '{req.executable}' not installed on agent",
+                "artifactUri": None,
+                "completedAt": datetime.now(timezone.utc).isoformat(),
+            })
+            return
+
         worker = threading.Thread(target=self._run_dispatched, args=(req,), daemon=True)
+        with self._active_runs_lock:
+            self._active_runs[req.run_id] = worker
         worker.start()
 
     def _run_dispatched(self, req: ExecutionRequest) -> None:
@@ -174,22 +209,28 @@ class AgentHubClient:
 
         result = self.executor.execute(req, on_output=on_output)
 
-        # Try to ship the tool's primary artifact to MinIO. Upload failures
-        # don't block completion — we still report to the backend with a
-        # null artifactUri so the run closes out cleanly.
         artifact_uri: Optional[str] = None
+        uploaded_artifacts: list[dict] = []
         primary = pick_primary_artifact(result.artifact_files)
-        if primary is not None:
+
+        for artifact_file in result.artifact_files:
             try:
                 upload = self.uploader.upload(
                     run_id=result.run_id,
-                    artifact_path=primary,
-                    content_type=_content_type_for(primary),
+                    artifact_path=artifact_file,
+                    content_type=_content_type_for(artifact_file),
                 )
-                artifact_uri = upload.artifact_uri
-                logger.info("Uploaded artifact for run %s → %s", result.run_id, artifact_uri)
+                uploaded_artifacts.append({
+                    "fileName": artifact_file.name,
+                    "uri": upload.artifact_uri,
+                    "contentType": _content_type_for(artifact_file),
+                    "sizeBytes": artifact_file.stat().st_size,
+                })
+                if artifact_file == primary:
+                    artifact_uri = upload.artifact_uri
+                logger.info("Uploaded artifact: %s → %s", artifact_file.name, upload.artifact_uri)
             except ArtifactUploadError as exc:
-                logger.error("Artifact upload failed for run %s: %s", result.run_id, exc)
+                logger.error("Artifact upload failed for %s: %s", artifact_file.name, exc)
 
         self._invoke("RunCompleted", {
             "runId": result.run_id,
@@ -197,8 +238,12 @@ class AgentHubClient:
             "exitCode": result.exit_code,
             "errorMessage": result.error_message,
             "artifactUri": artifact_uri,
+            "artifacts": uploaded_artifacts,
             "completedAt": result.completed_at.isoformat(),
         })
+
+        with self._active_runs_lock:
+            self._active_runs.pop(req.run_id, None)
 
     def _heartbeat_loop(self) -> None:
         while not self._stopping.is_set():
@@ -211,8 +256,10 @@ class AgentHubClient:
     def _send_heartbeat(self, *, initial: bool) -> None:
         payload = {
             "status": "Online",
-            "capabilities": self.config.capabilities,
+            "capabilities": self._capabilities.capability_labels,
         }
+        if initial:
+            payload["capabilityDetails"] = self._capabilities.to_heartbeat_payload()
         logger.debug("Heartbeat → %s", payload)
         self._invoke("Heartbeat", payload)
 
