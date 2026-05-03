@@ -209,9 +209,11 @@ class AgentHubClient:
 
         result = self.executor.execute(req, on_output=on_output)
 
-        artifact_uri: Optional[str] = None
         uploaded_artifacts: list[dict] = []
         primary = pick_primary_artifact(result.artifact_files)
+        primary_uri: Optional[str] = None
+        first_success_uri: Optional[str] = None
+        upload_errors: list[str] = []
 
         for artifact_file in result.artifact_files:
             try:
@@ -226,17 +228,40 @@ class AgentHubClient:
                     "contentType": _content_type_for(artifact_file),
                     "sizeBytes": artifact_file.stat().st_size,
                 })
-                if artifact_file == primary:
-                    artifact_uri = upload.artifact_uri
+                if first_success_uri is None:
+                    first_success_uri = upload.artifact_uri
+                if primary is not None and artifact_file == primary:
+                    primary_uri = upload.artifact_uri
                 logger.info("Uploaded artifact: %s → %s", artifact_file.name, upload.artifact_uri)
             except ArtifactUploadError as exc:
+                upload_errors.append(f"{artifact_file.name}: {exc}")
                 logger.error("Artifact upload failed for %s: %s", artifact_file.name, exc)
+
+        # Prefer the parser-primary file (e.g. output.xml), else any successful upload.
+        artifact_uri = primary_uri if primary_uri is not None else first_success_uri
+
+        error_message = result.error_message
+        if artifact_uri is None:
+            if not result.artifact_files:
+                note = (
+                    "No artifact files in run workdir (tool did not write expected outputs "
+                    "such as output.xml — check argv and permissions)."
+                )
+                logger.warning("Run %s: %s", result.run_id, note)
+                error_message = _append_error_note(error_message, note)
+            elif upload_errors:
+                joined = "; ".join(upload_errors[:5])
+                if len(upload_errors) > 5:
+                    joined += f"; … ({len(upload_errors)} failures)"
+                note = f"Artifact upload failed — {joined}"
+                logger.error("Run %s: %s", result.run_id, note)
+                error_message = _append_error_note(error_message, note)
 
         self._invoke("RunCompleted", {
             "runId": result.run_id,
             "success": result.success,
             "exitCode": result.exit_code,
-            "errorMessage": result.error_message,
+            "errorMessage": error_message,
             "artifactUri": artifact_uri,
             "artifacts": uploaded_artifacts,
             "completedAt": result.completed_at.isoformat(),
@@ -292,6 +317,13 @@ class AgentHubClient:
             self._connection.send(method, [payload])
         except Exception:  # pragma: no cover — never kill the agent loop
             logger.exception("Failed to invoke %s on hub", method)
+
+
+def _append_error_note(existing: Optional[str], note: str) -> str:
+    """Joins a secondary diagnostic onto the tool's errorMessage for the hub."""
+    if not existing or not existing.strip():
+        return note
+    return f"{existing.strip()} | {note}"
 
 
 def _default_platform_label() -> str:
