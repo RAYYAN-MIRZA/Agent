@@ -161,13 +161,17 @@ def _expand_argv(argv: list[str], run_workdir: Path) -> list[str]:
     return expanded
 
 
+_PRIMARY_ARTIFACT_PRIORITY = [".xml", ".jsonl", ".json", ".dat", ".log", ".csv"]
+
+
 def pick_primary_artifact(files: list[Path]) -> Optional[Path]:
-    """Heuristic for "what's the main file to upload?". Prefers nmap XML first."""
+    """Heuristic: pick the most parser-friendly file by extension priority."""
     if not files:
         return None
-    for candidate in files:
-        if candidate.suffix.lower() == ".xml":
-            return candidate
+    for ext in _PRIMARY_ARTIFACT_PRIORITY:
+        for candidate in files:
+            if candidate.suffix.lower() == ext:
+                return candidate
     return files[0]
 
 

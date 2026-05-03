@@ -31,6 +31,8 @@ class AgentHubClient:
     EXECUTABLE_ALLOWLIST = frozenset([
         "nmap", "nuclei", "zap-cli", "masscan", "nikto",
         "testssl.sh", "amass", "subfinder", "httpx",
+        "ffuf", "hydra", "msfconsole", "trivy", "lynis",
+        "sslscan", "airodump-ng", "feroxbuster",
     ])
 
     def __init__(
@@ -336,7 +338,10 @@ def _content_type_for(path) -> str:
     return {
         ".xml": "application/xml",
         ".json": "application/json",
+        ".jsonl": "application/x-ndjson",
         ".txt": "text/plain",
         ".log": "text/plain",
+        ".dat": "text/plain",
+        ".csv": "text/csv",
         ".pcap": "application/vnd.tcpdump.pcap",
     }.get(suffix, "application/octet-stream")

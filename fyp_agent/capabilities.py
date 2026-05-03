@@ -23,6 +23,14 @@ KNOWN_TOOLS = [
     ("amass", "version"),
     ("subfinder", "-version"),
     ("httpx", "-version"),
+    ("ffuf", "-V"),
+    ("hydra", "-h"),
+    ("msfconsole", "--version"),
+    ("trivy", "--version"),
+    ("lynis", "--version"),
+    ("sslscan", "--version"),
+    ("airodump-ng", "--help"),
+    ("feroxbuster", "--version"),
 ]
 
 
