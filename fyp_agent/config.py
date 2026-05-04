@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
+from dotenv import load_dotenv
 
 
 DEFAULT_CONFIG_PATH = Path.home() / ".fyp-agent" / "config.yaml"
@@ -136,22 +137,11 @@ def _default_state_dir() -> Path:
 
 
 def _load_dotenv() -> None:
-    """Loads KEY=VALUE pairs from .env files into process env if missing."""
-    candidates = [
-        Path.cwd() / ".env",
-        Path(__file__).resolve().parents[1] / ".env",
-    ]
+    """Merge ``.env`` into ``os.environ`` for keys not already set (shell wins).
 
-    for env_path in candidates:
-        if not env_path.exists():
-            continue
-
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in stripped:
-                continue
-            key, value = stripped.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip("'").strip('"')
-            if key and key not in os.environ:
-                os.environ[key] = value
+    Loads ``./.env`` (cwd), then ``<repo>/.env`` beside the ``fyp_agent`` package
+    so ``python -m fyp_agent`` picks up project env without ``source .env``.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    load_dotenv(Path.cwd() / ".env", override=False)
+    load_dotenv(repo_root / ".env", override=False)
