@@ -91,12 +91,62 @@ def _detect_local_cidr() -> Optional[str]:
     return None
 
 
+def _resolve_scan_iface(cidr: str) -> Optional[str]:
+    """Pick the local interface that owns the target CIDR.
+
+    Critical on multi-homed agents (e.g. the lab agent attached to both
+    backend-net and lab-net). Without this, Scapy's ``srp`` defaults to
+    ``conf.iface`` — typically the default-route NIC — and ARP requests
+    never leave the wrong subnet, so only the gateway ever responds.
+    We pick the iface whose own routed subnet contains the target.
+    """
+    try:
+        target = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return None
+
+    try:
+        from scapy.all import conf  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+
+    try:
+        # conf.route.routes is a list of tuples; the schema is stable across
+        # scapy versions: (network_int, netmask_int, gw, iface, addr, metric).
+        for entry in conf.route.routes:
+            try:
+                net_int, mask_int, _gw, iface, _addr, *_ = entry
+            except (TypeError, ValueError):
+                continue
+            if not iface or iface == "lo":
+                continue
+            if mask_int == 0:
+                continue
+            try:
+                route_net = ipaddress.IPv4Network(
+                    f"{ipaddress.IPv4Address(net_int)}/{bin(mask_int).count('1')}",
+                    strict=False,
+                )
+            except (ipaddress.AddressValueError, ValueError):
+                continue
+            if route_net.subnet_of(target) or target.subnet_of(route_net):
+                return iface
+    except Exception:  # pragma: no cover — never crash discovery on a route lookup
+        logger.debug("scapy route lookup failed", exc_info=True)
+    return None
+
+
 def _arp_scan_scapy(cidr: str) -> list[DiscoveredDevice]:
     """Use Scapy for ARP sweep (requires root/admin on Linux)."""
     try:
         from scapy.all import ARP, Ether, srp
         pkt = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=cidr)
-        ans, _ = srp(pkt, timeout=2, retry=0, verbose=0)
+        iface = _resolve_scan_iface(cidr)
+        if iface:
+            logger.debug("ARP sweep using iface=%s for %s", iface, cidr)
+            ans, _ = srp(pkt, timeout=2, retry=0, verbose=0, iface=iface)
+        else:
+            ans, _ = srp(pkt, timeout=2, retry=0, verbose=0)
         devices = []
         for _, rcv in ans:
             devices.append(DiscoveredDevice(
