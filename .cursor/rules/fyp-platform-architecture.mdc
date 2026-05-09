@@ -31,3 +31,11 @@ Treat each type as a **separate** threat model, privilege model, and update stor
 - **Agent / Host.Agent:** Edge clients that execute dispatched work and report back.
 
 When adding features, keep **deployment profiles** (SaaS vs on-prem vs air-gapped) in mind and surface them through **configuration**, not duplicate code paths unless necessary.
+
+## Human-readable docs
+
+- **FYP.Backend** — repo `README.md` (ports, compose, worker).
+- **FYP.UI** — repo `README.md` and `DESIGN_SYSTEM.md`.
+- **Agent** — `README.md` and `fyp_agent/README.md`.
+- **Host.Agent** — `README.md` (placeholder until the host agent ships).
+- **fyp-testing-lab1** — Docker lab and endpoints.

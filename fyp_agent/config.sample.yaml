@@ -1,13 +1,14 @@
 # FYP agent sample configuration.
 #
-# Copy this file to ~/.fyp-agent/config.yaml (Linux) or equivalent on
-# Windows, and fill in at least the api_base_url and enrollment_token.
-# Everything in this file can also be set via FYP_AGENT_* env vars.
+# Copy to ~/.fyp-agent/config.yaml (Linux) or your user config path on Windows.
+# Override any key with FYP_AGENT_* environment variables (see README).
 
-api_base_url: "http://localhost:5000"
+# Must match the API base URL as seen from this host (no /api suffix).
+# Local default for FYP.Api is port 5017 (see FYP.Backend launchSettings.json).
+api_base_url: "http://localhost:5017"
 
-# One-shot enrollment token; obtain via:
-#   curl -X POST http://localhost:5000/api/v1/agents/enrollments \
+# One-time enrollment token from:
+#   curl -X POST http://localhost:5017/api/v1/agents/enrollments \
 #        -H 'Content-Type: application/json' \
 #        -d '{"label":"kali-lab","ttlHours":24}'
 enrollment_token: "paste-token-here"
