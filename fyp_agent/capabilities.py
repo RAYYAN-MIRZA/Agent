@@ -9,11 +9,14 @@ import platform
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
-KNOWN_TOOLS = [
+# Second element: argv tail after the binary (single flag or multi-arg probe).
+VersionProbe = Union[str, list[str]]
+
+KNOWN_TOOLS: list[tuple[str, VersionProbe]] = [
     ("nmap", "--version"),
     ("nuclei", "-version"),
     ("zap-cli", "--version"),
@@ -27,7 +30,7 @@ KNOWN_TOOLS = [
     ("hydra", "-h"),
     ("msfconsole", "--version"),
     ("trivy", "--version"),
-    ("lynis", "--version"),
+    ("lynis", ["show", "version"]),
     ("sslscan", "--version"),
     ("airodump-ng", "--help"),
     ("feroxbuster", "--version"),
@@ -93,13 +96,13 @@ def detect_capabilities(extra_tools: Optional[list[str]] = None) -> AgentCapabil
             if not any(t[0] == name for t in tools_to_check):
                 tools_to_check.append((name, "--version"))
 
-    for tool_name, version_flag in tools_to_check:
+    for tool_name, version_probe in tools_to_check:
         tool_path = shutil.which(tool_name)
         if tool_path is None:
             caps.tools.append(ToolCapability(name=tool_name, available=False))
             continue
 
-        version = _get_tool_version(tool_path, version_flag)
+        version = _get_tool_version(tool_path, version_probe)
         caps.tools.append(ToolCapability(
             name=tool_name,
             available=True,
@@ -111,11 +114,12 @@ def detect_capabilities(extra_tools: Optional[list[str]] = None) -> AgentCapabil
     return caps
 
 
-def _get_tool_version(tool_path: str, version_flag: str) -> Optional[str]:
+def _get_tool_version(tool_path: str, version_probe: VersionProbe) -> Optional[str]:
     """Run the tool's version command and extract a version string."""
+    probe_args = [version_probe] if isinstance(version_probe, str) else list(version_probe)
     try:
         result = subprocess.run(
-            [tool_path, version_flag],
+            [tool_path, *probe_args],
             capture_output=True,
             text=True,
             timeout=10,
