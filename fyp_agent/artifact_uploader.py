@@ -100,6 +100,12 @@ class ArtifactUploader:
             raise ArtifactUploadError("Ticket response was not JSON") from exc
 
     def _put_file(self, upload_url: str, path: Path, content_type: str) -> None:
+        # Presigned MinIO dev URLs are plain HTTP on the LAN; do not apply API TLS
+        # verification settings to the object-store PUT.
+        verify_put = self._verify
+        if upload_url.lower().startswith("http://"):
+            verify_put = False
+
         # Streaming from disk keeps memory flat for large scans.
         with path.open("rb") as handle:
             try:
@@ -108,7 +114,7 @@ class ArtifactUploader:
                     data=handle,
                     headers={"Content-Type": content_type},
                     timeout=self._timeout,
-                    verify=self._verify,
+                    verify=verify_put,
                 )
             except requests.RequestException as exc:
                 raise ArtifactUploadError(f"Upload PUT failed: {exc}") from exc
