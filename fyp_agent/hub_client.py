@@ -21,6 +21,7 @@ from .config import AgentConfig
 from .discovery import DiscoveryConfig, DiscoveryRunner
 from .executor import ExecutionRequest, RunExecutor, pick_primary_artifact
 from .identity_store import AgentIdentity
+from .msf_payloads import query_exploit_payloads
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,7 @@ class AgentHubClient:
         connection.on("Dispatch", self._on_dispatch)
         connection.on("Cancel", self._on_cancel)
         connection.on("HelloAck", self._on_hello_ack)
+        connection.on("QueryMsfPayloads", self._on_query_msf_payloads)
 
         return connection
 
@@ -146,6 +148,45 @@ class AgentHubClient:
         logger.info("Cancel requested for run %s (%s)", run_id, reason)
         # Phase 5 wires a per-run subprocess registry; for Phase 4 the
         # agent simply logs the request.
+
+    def _on_query_msf_payloads(self, args) -> None:
+        if not args:
+            return
+        payload = args[0] if isinstance(args[0], dict) else {}
+        request_id = payload.get("requestId")
+        exploit_path = payload.get("exploitPath")
+        if not request_id or not exploit_path:
+            logger.warning("Malformed QueryMsfPayloads payload: %s", payload)
+            return
+
+        if not self._capabilities.has_tool("msfconsole"):
+            self._invoke("MsfPayloadsResult", {
+                "requestId": request_id,
+                "defaultPayload": None,
+                "compatiblePayloads": [],
+                "error": "msfconsole is not installed on this agent",
+            })
+            return
+
+        worker = threading.Thread(
+            target=self._run_msf_payload_query,
+            args=(request_id, exploit_path),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_msf_payload_query(self, request_id: str, exploit_path: str) -> None:
+        logger.info("MSF payload query for %s (request %s)", exploit_path, request_id)
+        result = query_exploit_payloads(exploit_path, timeout_seconds=45)
+        body = {
+            "requestId": request_id,
+            "defaultPayload": result.default_payload,
+            "compatiblePayloads": result.compatible_payloads,
+            "error": result.error,
+        }
+        if not result.success:
+            logger.warning("MSF payload query failed: %s", result.error)
+        self._invoke("MsfPayloadsResult", body)
 
     def _on_dispatch(self, args) -> None:
         if not args:
