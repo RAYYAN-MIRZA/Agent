@@ -155,9 +155,12 @@ class AgentHubClient:
         payload = args[0] if isinstance(args[0], dict) else {}
         request_id = payload.get("requestId")
         exploit_path = payload.get("exploitPath")
+        timeout_seconds = int(payload.get("timeoutSeconds") or 110)
         if not request_id or not exploit_path:
             logger.warning("Malformed QueryMsfPayloads payload: %s", payload)
             return
+
+        request_id = str(request_id).strip()
 
         if not self._capabilities.has_tool("msfconsole"):
             self._invoke("MsfPayloadsResult", {
@@ -168,25 +171,55 @@ class AgentHubClient:
             })
             return
 
+        msf_path = None
+        for tool in self._capabilities.tools:
+            if tool.name == "msfconsole" and tool.available and tool.path:
+                msf_path = tool.path
+                break
+
         worker = threading.Thread(
             target=self._run_msf_payload_query,
-            args=(request_id, exploit_path),
+            args=(request_id, exploit_path, msf_path, timeout_seconds),
             daemon=True,
         )
         worker.start()
 
-    def _run_msf_payload_query(self, request_id: str, exploit_path: str) -> None:
-        logger.info("MSF payload query for %s (request %s)", exploit_path, request_id)
-        result = query_exploit_payloads(exploit_path, timeout_seconds=45)
-        body = {
-            "requestId": request_id,
-            "defaultPayload": result.default_payload,
-            "compatiblePayloads": result.compatible_payloads,
-            "error": result.error,
-        }
-        if not result.success:
-            logger.warning("MSF payload query failed: %s", result.error)
-        self._invoke("MsfPayloadsResult", body)
+    def _run_msf_payload_query(
+        self,
+        request_id: str,
+        exploit_path: str,
+        msf_path: Optional[str],
+        timeout_seconds: int,
+    ) -> None:
+        logger.info(
+            "MSF payload query for %s (request %s, timeout=%ss)",
+            exploit_path,
+            request_id,
+            timeout_seconds,
+        )
+        try:
+            result = query_exploit_payloads(
+                exploit_path,
+                msfconsole=msf_path,
+                timeout_seconds=max(30, timeout_seconds - 5),
+            )
+            body = {
+                "requestId": request_id,
+                "defaultPayload": result.default_payload,
+                "compatiblePayloads": result.compatible_payloads,
+                "error": result.error,
+            }
+            if not result.success:
+                logger.warning("MSF payload query failed: %s", result.error)
+            self._invoke("MsfPayloadsResult", body)
+        except Exception as exc:
+            logger.exception("MSF payload query crashed for %s", exploit_path)
+            self._invoke("MsfPayloadsResult", {
+                "requestId": request_id,
+                "defaultPayload": None,
+                "compatiblePayloads": [],
+                "error": str(exc),
+            })
 
     def _on_dispatch(self, args) -> None:
         if not args:

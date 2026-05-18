@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 
 import requests
 
+from .capabilities import detect_capabilities
 from .config import AgentConfig
 from .identity_store import AgentIdentity
 
@@ -42,12 +43,13 @@ def enroll(config: AgentConfig) -> AgentIdentity:
         )
 
     url = urljoin(config.api_base_url.rstrip("/") + "/", "api/v1/agents/enroll")
+    detected = detect_capabilities(config.capabilities)
     body = {
         "enrollmentToken": config.enrollment_token,
         "name": config.agent_name,
         "hostname": config.hostname or socket.gethostname(),
         "platform": config.platform or f"{platform.system()} {platform.release()}",
-        "capabilities": config.capabilities,
+        "capabilities": detected.capability_labels,
     }
 
     logger.info("Enrolling at %s as '%s'", url, config.agent_name)
