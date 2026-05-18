@@ -130,6 +130,9 @@ class RunExecutor:
 
         completed_at = datetime.now(timezone.utc)
         success = exit_code == 0 and not timed_out
+        # Nikto uses exit 1 when findings are reported; that is a successful scan.
+        if req.executable == "nikto" and exit_code == 1 and not timed_out:
+            success = True
 
         # Whatever the tool dropped into its workdir (XML reports, json
         # summaries, pcaps…) is candidate for upload. Callers pick which
@@ -161,7 +164,7 @@ def _expand_argv(argv: list[str], run_workdir: Path) -> list[str]:
     return expanded
 
 
-_PRIMARY_ARTIFACT_PRIORITY = [".xml", ".jsonl", ".json", ".dat", ".log", ".csv"]
+_PRIMARY_ARTIFACT_PRIORITY = [".xml", ".jsonl", ".json", ".txt", ".dat", ".log", ".csv"]
 
 
 def pick_primary_artifact(files: list[Path]) -> Optional[Path]:

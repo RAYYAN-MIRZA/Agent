@@ -106,29 +106,28 @@ class ArtifactUploader:
         if upload_url.lower().startswith("http://"):
             verify_put = False
 
-        # MinIO/S3 presigned PUT requires Content-Length; chunked uploads get 411.
-        size = path.stat().st_size
+        # MinIO/S3 presigned PUT requires Content-Length; streaming file handles
+        # can still use chunked encoding and get 411 MissingContentLength.
+        body = path.read_bytes()
         headers = {
             "Content-Type": content_type,
-            "Content-Length": str(size),
+            "Content-Length": str(len(body)),
         }
 
-        # Streaming from disk keeps memory flat for large scans.
-        with path.open("rb") as handle:
-            try:
-                resp = requests.put(
-                    upload_url,
-                    data=handle,
-                    headers=headers,
-                    timeout=self._timeout,
-                    verify=verify_put,
-                )
-            except requests.RequestException as exc:
-                raise ArtifactUploadError(f"Upload PUT failed: {exc}") from exc
+        try:
+            resp = requests.put(
+                upload_url,
+                data=body,
+                headers=headers,
+                timeout=self._timeout,
+                verify=verify_put,
+            )
+        except requests.RequestException as exc:
+            raise ArtifactUploadError(f"Upload PUT failed: {exc}") from exc
 
         if resp.status_code not in (200, 201, 204):
             raise ArtifactUploadError(
                 f"Upload PUT returned {resp.status_code}: {resp.text[:200]}"
             )
 
-        logger.info("Uploaded %s (%d bytes) to %s", path.name, path.stat().st_size, upload_url)
+        logger.info("Uploaded %s (%d bytes) to %s", path.name, len(body), upload_url)
