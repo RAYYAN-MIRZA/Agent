@@ -106,13 +106,20 @@ class ArtifactUploader:
         if upload_url.lower().startswith("http://"):
             verify_put = False
 
+        # MinIO/S3 presigned PUT requires Content-Length; chunked uploads get 411.
+        size = path.stat().st_size
+        headers = {
+            "Content-Type": content_type,
+            "Content-Length": str(size),
+        }
+
         # Streaming from disk keeps memory flat for large scans.
         with path.open("rb") as handle:
             try:
                 resp = requests.put(
                     upload_url,
                     data=handle,
-                    headers={"Content-Type": content_type},
+                    headers=headers,
                     timeout=self._timeout,
                     verify=verify_put,
                 )
