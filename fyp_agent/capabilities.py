@@ -34,6 +34,7 @@ KNOWN_TOOLS: list[tuple[str, VersionProbe]] = [
     ("sslscan", "--version"),
     ("airodump-ng", "--help"),
     ("feroxbuster", "--version"),
+    ("nxc", "--version"),
 ]
 
 

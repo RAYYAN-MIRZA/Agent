@@ -32,7 +32,7 @@ class AgentHubClient:
         "nmap", "nuclei", "zap-cli", "masscan", "nikto",
         "testssl.sh", "amass", "subfinder", "httpx",
         "ffuf", "hydra", "msfconsole", "trivy", "lynis",
-        "sslscan", "airodump-ng", "feroxbuster",
+        "sslscan", "airodump-ng", "feroxbuster", "nxc",
     ])
 
     def __init__(
