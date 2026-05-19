@@ -133,11 +133,23 @@ class RunExecutor:
         # Nikto uses exit 1 when findings are reported; that is a successful scan.
         if req.executable == "nikto" and exit_code == 1 and not timed_out:
             success = True
+        # JSON report plugin can crash (exit 255) after a valid txt report was written.
+        if (
+            req.executable == "nikto"
+            and not success
+            and not timed_out
+            and (run_workdir / "nikto.txt").is_file()
+            and (run_workdir / "nikto.txt").stat().st_size > 0
+        ):
+            success = True
 
         # Whatever the tool dropped into its workdir (XML reports, json
         # summaries, pcaps…) is candidate for upload. Callers pick which
         # file the backend cares about.
-        artifact_files = [p for p in sorted(run_workdir.glob("*")) if p.is_file() and p != stdout_path]
+        artifact_files = [
+            p for p in sorted(run_workdir.glob("*"))
+            if p.is_file() and p != stdout_path and _is_upload_candidate(p)
+        ]
 
         return ExecutionResult(
             run_id=req.run_id,
@@ -151,6 +163,11 @@ class RunExecutor:
             started_at=started_at,
             completed_at=completed_at,
         )
+
+
+def _is_upload_candidate(path: Path) -> bool:
+    """Skip known-bad Nikto JSON paths (double extension from -o *.json + -Format json)."""
+    return not path.name.endswith(".json.json")
 
 
 def _expand_argv(argv: list[str], run_workdir: Path) -> list[str]:
