@@ -64,6 +64,10 @@ First run exchanges the enrollment token for long-lived credentials and writes *
 
 If upload fails, the run can still finish with a null **`artifactUri`**; check agent logs.
 
+## Metasploit (lab)
+
+When the agent runs inside **fyp-testing-lab1** with `agent-msf.Dockerfile`, reverse payloads must use the agent’s **lab-net IP** as `LHOST` (default `172.28.0.2`), not `127.0.0.1`. See **`fyp-testing-lab1/docs/MSF_LAB_NETWORKING.md`** and run **`scripts/msf-lab-smoke.sh`** after the stack is up.
+
 ## Related
 
 - **FYP.Backend** — API and hubs

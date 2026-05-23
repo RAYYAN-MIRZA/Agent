@@ -286,7 +286,7 @@ class AgentHubClient:
         result = self.executor.execute(req, on_output=on_output)
 
         uploaded_artifacts: list[dict] = []
-        primary = pick_primary_artifact(result.artifact_files)
+        primary = pick_primary_artifact(result.artifact_files, req.executable)
         primary_uri: Optional[str] = None
         first_success_uri: Optional[str] = None
         upload_errors: list[str] = []
@@ -355,10 +355,15 @@ class AgentHubClient:
                 logger.exception("Heartbeat send failed")
 
     def _send_heartbeat(self, *, initial: bool) -> None:
+        from .network_util import resolve_callback_ipv4
+
+        callback_ipv4 = resolve_callback_ipv4(self.config.discovery_cidr)
         payload = {
             "status": "Online",
             "capabilities": self._capabilities.capability_labels,
         }
+        if callback_ipv4:
+            payload["callbackIpv4"] = callback_ipv4
         if initial:
             payload["capabilityDetails"] = self._capabilities.to_heartbeat_payload()
         logger.debug("Heartbeat → %s", payload)

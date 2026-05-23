@@ -142,6 +142,15 @@ class RunExecutor:
             and (run_workdir / "nikto.txt").stat().st_size > 0
         ):
             success = True
+        # msfconsole often exits non-zero while still writing a usable spool log.
+        if (
+            req.executable == "msfconsole"
+            and not success
+            and not timed_out
+        ):
+            spool = run_workdir / "msf-spool.log"
+            if spool.is_file() and spool.stat().st_size > 0:
+                success = True
 
         # Whatever the tool dropped into its workdir (XML reports, json
         # summaries, pcaps…) is candidate for upload. Callers pick which
@@ -184,10 +193,14 @@ def _expand_argv(argv: list[str], run_workdir: Path) -> list[str]:
 _PRIMARY_ARTIFACT_PRIORITY = [".xml", ".jsonl", ".json", ".txt", ".dat", ".log", ".csv"]
 
 
-def pick_primary_artifact(files: list[Path]) -> Optional[Path]:
+def pick_primary_artifact(files: list[Path], executable: str | None = None) -> Optional[Path]:
     """Heuristic: pick the most parser-friendly file by extension priority."""
     if not files:
         return None
+    if executable and executable.lower() == "msfconsole":
+        for candidate in files:
+            if candidate.name == "msf-spool.log":
+                return candidate
     for ext in _PRIMARY_ARTIFACT_PRIORITY:
         for candidate in files:
             if candidate.suffix.lower() == ext:
