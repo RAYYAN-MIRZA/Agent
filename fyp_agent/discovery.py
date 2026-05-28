@@ -14,13 +14,20 @@ import logging
 import ipaddress
 import platform
 import re
+import socket
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
 
+from .network_util import get_local_host_on_cidr
+
 logger = logging.getLogger(__name__)
+
+# Subnets larger than this skip ICMP ping sweeps (ARP-only).
+_MAX_PING_SWEEP_HOSTS = 512
 
 
 @dataclass
@@ -144,9 +151,9 @@ def _arp_scan_scapy(cidr: str) -> list[DiscoveredDevice]:
         iface = _resolve_scan_iface(cidr)
         if iface:
             logger.debug("ARP sweep using iface=%s for %s", iface, cidr)
-            ans, _ = srp(pkt, timeout=2, retry=0, verbose=0, iface=iface)
+            ans, _ = srp(pkt, timeout=4, retry=1, verbose=0, iface=iface)
         else:
-            ans, _ = srp(pkt, timeout=2, retry=0, verbose=0)
+            ans, _ = srp(pkt, timeout=4, retry=1, verbose=0)
         devices = []
         for _, rcv in ans:
             devices.append(DiscoveredDevice(
@@ -191,22 +198,155 @@ def _arp_scan_command(cidr: str) -> list[DiscoveredDevice]:
     return devices
 
 
-def run_discovery_scan(cidr: str) -> list[DiscoveredDevice]:
-    """Run a single ARP discovery sweep over the given CIDR."""
-    raw_devices = _arp_scan_scapy(cidr)
-    if not raw_devices:
-        raw_devices = _arp_scan_command(cidr)
+def _merge_devices(*groups: list[DiscoveredDevice]) -> list[DiscoveredDevice]:
+    """Merge device lists; prefer entries that include a MAC address."""
+    by_ip: dict[str, DiscoveredDevice] = {}
+    for group in groups:
+        for device in group:
+            existing = by_ip.get(device.ip)
+            if existing is None:
+                by_ip[device.ip] = device
+            elif not existing.mac and device.mac:
+                by_ip[device.ip] = device
+    return list(by_ip.values())
 
+
+def _local_device(cidr: str) -> Optional[DiscoveredDevice]:
+    """Include the scanning agent's own host on the discovery subnet."""
+    local = get_local_host_on_cidr(cidr)
+    if not local:
+        return None
+    ip, mac = local
+    hostname: Optional[str]
+    try:
+        hostname = socket.gethostname()
+    except OSError:
+        hostname = None
+    return DiscoveredDevice(
+        ip=ip,
+        mac=mac or "",
+        hostname=hostname,
+        status="up",
+    )
+
+
+def _ping_responding_hosts(cidr: str) -> set[str]:
+    """ICMP ping sweep; returns IPs that replied (live hosts only)."""
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return set()
+
+    if network.version != 4:
+        return set()
+
+    hosts = list(network.hosts())
+    if len(hosts) > _MAX_PING_SWEEP_HOSTS:
+        logger.debug(
+            "Skipping ping sweep for %s (%d hosts > %d)",
+            network.with_prefixlen,
+            len(hosts),
+            _MAX_PING_SWEEP_HOSTS,
+        )
+        return set()
+
+    system = platform.system().lower()
+    responded: set[str] = set()
+    lock = threading.Lock()
+
+    def ping_one(target: str) -> None:
+        try:
+            if system == "windows":
+                result = subprocess.run(
+                    ["ping", "-n", "1", "-w", "200", target],
+                    capture_output=True,
+                    timeout=3,
+                )
+            else:
+                result = subprocess.run(
+                    ["ping", "-c", "1", "-W", "1", target],
+                    capture_output=True,
+                    timeout=3,
+                )
+            if result.returncode == 0:
+                with lock:
+                    responded.add(target)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    logger.debug("Ping sweep on %s (%d hosts)", network.with_prefixlen, len(hosts))
+    with ThreadPoolExecutor(max_workers=32) as pool:
+        list(pool.map(ping_one, [str(h) for h in hosts]))
+    return responded
+
+
+def _filter_command_arp_to_live(
+    devices: list[DiscoveredDevice],
+    ping_ok: set[str],
+) -> list[DiscoveredDevice]:
+    """Drop passive ARP cache entries for hosts that did not answer ping this sweep."""
+    if not ping_ok:
+        return devices
+    live = [d for d in devices if d.ip in ping_ok]
+    dropped = len(devices) - len(live)
+    if dropped:
+        logger.debug(
+            "Filtered %d stale ARP cache entries (no ping reply this sweep)",
+            dropped,
+        )
+    return live
+
+
+def _needs_proactive_neighbor_scan(devices: list[DiscoveredDevice], cidr: str) -> bool:
+    """True when ARP results look sparse (typical when only the gateway responded)."""
+    if not devices:
+        return True
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return False
+    # /24 and smaller: expect multiple LAN hosts when peers exist.
+    if network.num_addresses <= 256 and len(devices) <= 2:
+        return True
+    return False
+
+
+def run_discovery_scan(cidr: str) -> list[DiscoveredDevice]:
+    """Run a single discovery sweep over the given CIDR (ARP + proactive ping)."""
     try:
         target_network = ipaddress.ip_network(cidr, strict=False)
     except ValueError:
         logger.warning("Invalid discovery CIDR '%s' — skipping scan batch", cidr)
         return []
 
+    scapy_devices = _arp_scan_scapy(cidr)
+    raw_devices = list(scapy_devices)
+
+    if _needs_proactive_neighbor_scan(scapy_devices, cidr):
+        logger.info(
+            "Sparse ARP on %s (%d devices) — running ping sweep to populate neighbor tables",
+            target_network.with_prefixlen,
+            len(scapy_devices),
+        )
+        ping_ok = _ping_responding_hosts(cidr)
+        retry_scapy = _arp_scan_scapy(cidr)
+        if len(retry_scapy) > len(raw_devices):
+            raw_devices = retry_scapy
+        retry_cmd = _filter_command_arp_to_live(_arp_scan_command(cidr), ping_ok)
+        raw_devices = _merge_devices(raw_devices, retry_cmd)
+    elif not raw_devices:
+        ping_ok = _ping_responding_hosts(cidr)
+        raw_devices = _filter_command_arp_to_live(_arp_scan_command(cidr), ping_ok)
+    # When Scapy returned a healthy set, trust active ARP only — do not merge
+    # passive `arp -a` cache entries that would keep WiFi-off hosts "Online".
+
+    local = _local_device(cidr)
+    merged = _merge_devices(raw_devices, [local] if local else [])
+
     filtered: list[DiscoveredDevice] = []
     dropped_ips: list[str] = []
 
-    for device in raw_devices:
+    for device in merged:
         try:
             ip = ipaddress.ip_address(device.ip)
         except ValueError:
@@ -231,7 +371,7 @@ def run_discovery_scan(cidr: str) -> list[DiscoveredDevice]:
         "Discovery scan found %d devices on %s (raw=%d, kept=%d)",
         len(filtered),
         target_network.with_prefixlen,
-        len(raw_devices),
+        len(merged),
         len(filtered),
     )
     return filtered
@@ -284,6 +424,8 @@ class DiscoveryRunner:
                 devices = run_discovery_scan(cidr)
                 if devices:
                     self._push_batch(devices)
+                else:
+                    logger.debug("Discovery sweep returned no devices for %s", cidr)
             except Exception:
                 logger.exception("Discovery loop error")
 
